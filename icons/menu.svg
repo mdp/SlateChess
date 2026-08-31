@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- SlateChess menu icon (three bars).
+
+     FRAME CONTRACT (ui/layout.lua): this icon renders box == ink --
+     the ink fills the viewBox edge to edge (0.25 units of bleed so
+     antialiasing doesn't clip), so the widget's box can be aligned to
+     a frame line and the ink lands exactly on it. -->
+<svg
+   xmlns="http://www.w3.org/2000/svg"
+   version="1.1"
+   width="48"
+   height="48"
+   viewBox="-0.25 -0.25 37 37"
+   id="svg1">
+  <path
+     style="fill:none;stroke:#000000;stroke-width:2;stroke-linecap:butt"
+     d="M 0,1 H 36.5 M 0,18.25 H 36.5 M 0,35.5 H 36.5"
+     id="bars" />
+</svg>

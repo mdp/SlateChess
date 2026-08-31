@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Valid-move marker: a small bullet centered on the tile --
+       (~26% of the square at render size), a shade darker than the
+       dark squares (0x88) so it reads on both square colors. -->
+  <circle cx="50" cy="50" r="13" fill="#606060"/>
+</svg>

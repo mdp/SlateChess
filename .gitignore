@@ -1,0 +1,10 @@
+/dev/
+reversiai3rd.lua
+dist/
+engines/stockfish
+engines/stockfish-arm64
+engines/stockfish-x64
+engines/chal
+engines/chal-arm64
+engines/chal-x64
+engines/stockfish*
