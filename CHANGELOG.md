@@ -4,7 +4,7 @@ All notable changes to SlateChess. The format is Keep a Changelog-ish;
 newest first. SlateChess is a fork of Casual Chess for KOReader — see
 LICENSE for the full attribution history.
 
-## 1.0 — 2026-08-31
+## 1.0.0 — 2026-08-31
 
 First SlateChess release. The plugin was renamed from PlyChess and now
 lives at https://github.com/mdp/SlateChess; history before this point
