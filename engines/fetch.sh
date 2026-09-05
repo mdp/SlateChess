@@ -32,7 +32,8 @@ download() {
 
 download "$ARCHIVE_URL" "$BUILD_DIR/berserk.tar.gz"
 tar -xzf "$BUILD_DIR/berserk.tar.gz" -C "$BUILD_DIR"
-SRC_DIR="$BUILD_DIR/Berserk-$REVISION/src"
+# GitHub lowercases tarball roots, so accept either case for the repo.
+SRC_DIR="$(find "$BUILD_DIR" -maxdepth 1 -type d -name '[Bb]erserk-*' -print -quit)/src"
 download "$NETWORK_URL" "$SRC_DIR/$NETWORK"
 
 if command -v shasum >/dev/null 2>&1; then
