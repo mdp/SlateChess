@@ -565,9 +565,11 @@ function App:buildUILayout()
     local bottom = OverlapGroup:new{dimen=Geometry:new{w=content_w,h=L.bottom_hud.h},allow_mirroring=false,
         self.bottom_hud,bottom_rule}
     local A=Layout.puzzleActions(content_w,L.bottom_hud.h)
+    -- Action labels ride the same typography bump as the top HUD (~66%):
+    -- the buttons are the puzzle's primary input affordance, not chrome.
     local function action(text, box, cb)
         return ButtonWidget:new{text=text,text_font_face="cfont",
-            text_font_size=math.max(8,math.floor(14*k+.5)),text_font_bold=false,
+            text_font_size=math.max(8,math.floor(23*k+.5)),text_font_bold=false,
             width=box.w,height=box.h,bordersize=math.max(1,math.floor(2*k+.5)),
             padding=0,margin=0,callback=cb}
     end

@@ -50,8 +50,12 @@ D.type = {
     notation={target=30,min=1,max_h=35}, status={target=28,min=1,max_h=32},
     action={target=14,min=1,max_h=18}, clock_far={target=19,min=1,max_h=42},
     clock_near={target=30,min=1,max_h=64},
-    puzzle_kicker={target=14,min=14,max_h=35},
-    puzzle_primary={target=19,min=19,max_h=45},
+    -- Puzzle HUD type is intentionally ~66% larger than the fresh chess HUD:
+    -- the puzzle has no engine lines or clocks to carry, so the three column
+    -- labels and values own the band. min stays at the old targets so the
+    -- dynamic fitter keeps a sane floor on dense device font stacks.
+    puzzle_kicker={target=23,min=14,max_h=35},
+    puzzle_primary={target=32,min=19,max_h=45},
 }
 
 function D.scaleFor(w,h) return math.min(w/D.master.w,h/D.master.h) end
