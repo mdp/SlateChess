@@ -20,9 +20,13 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 EMULATOR_DIR="${1:-${EMULATOR_DIR:-}}"
 if [ -z "$EMULATOR_DIR" ]; then
-    for base in "$HOME/Syncthing/mdp-src/koreader" "$HOME"; do
+    # The koreader subtree comes from the repo's own submodule; the sibling
+    # path covers pre-submodule checkouts synced from another machine.
+    for base in "$REPO_DIR/koreader" "$HOME/Syncthing/mdp-src/koreader" "$HOME"; do
         for cand in "$base"/koreader-emulator*/koreader "$base"/koreader*emu*/koreader; do
-            if [ -d "$cand" ]; then
+            # Require a runnable luajit: cross-OS synced builds exist in the
+            # same tree (e.g. the macOS one on a Linux box) and must be skipped.
+            if [ -d "$cand" ] && [ -e "$cand/luajit" ]; then
                 EMULATOR_DIR="$cand"
                 break 2
             fi

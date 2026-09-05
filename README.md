@@ -136,9 +136,18 @@ make package   # dist/slatechess.koplugin-v<version>.zip
 make install   # unzip onto a mounted Kindle's KOReader plugins dir
 ```
 
-To hack on the plugin inside a full KOReader checkout, run the emulator
-from the KOReader dev tree (`./kodev run`); symlink this folder into
-`koreader/plugins/slatechess.koplugin`.
+To hack on the plugin inside a full KOReader checkout, run the emulator from
+the KOReader dev tree. The KOReader checkout is vendored as a git submodule:
+
+```sh
+git submodule update --init --recursive koreader
+sh koreader/../engines/fetch.sh native   # build the Berserk engine binary
+```
+
+Then build the emulator once per machine (`./kodev build` inside `koreader/`)
+and run it - see `docs/koreader-emulator.md` for the full Linux/macOS build
+and run guide, including the emulated screen resolutions. The plugin is linked
+into `koreader/plugins/slatechess.koplugin` by portable relative symlinks.
 
 `make emU-test` drives KOReader's desktop emulator headless: it boots the
 plugin the way KOReader would and runs a scripted full session — a fresh
@@ -146,9 +155,9 @@ timed game, human move + engine reply, the eval pipeline, undo/redo, the
 board flip, a roles-only settings apply (clocks preserved), a PGN load with
 the computer to move, a flag-fell finish, and a save → re-boot restore —
 asserting the Arbiter view and the rendered widgets at every step
-(driver: `tools/emu-driver.lua`, runner: `tools/emu-test.sh`). Point
-`EMULATOR_DIR` at your `koreader` dir if auto-detection misses it. CI could
-run this against a nightly emulator build.
+(driver: `tools/emu-driver.lua`, runner: `tools/emu-test.sh`). It auto-detects
+`koreader/` (the submodule); point `EMULATOR_DIR` at another checkout if
+auto-detection misses it. CI could run this against a nightly emulator build.
 
 CI (GitHub Actions) installs LuaJIT 2.1 + luarocks, then runs `make test`
 and `make lint` on every push.
