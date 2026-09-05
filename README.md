@@ -1,5 +1,10 @@
 # SlateChess — chess for KOReader e-ink devices
 
+<p align="center">
+  <img width="379" height="511" alt="SlateChess — chess board" src="https://github.com/user-attachments/assets/22e06d73-6c7c-4b23-befc-4e1a595c98db" />
+  <img width="382" height="511" alt="SlatePuzzle — chess puzzles" src="https://github.com/user-attachments/assets/3966fe67-fb3f-4e9b-b348-4b298294f8fe" />
+</p>
+
 SlateChess is a chess plugin for [KOReader](https://github.com/koreader/koreader),
 built for low-power e-ink devices: Kindle, Kobo, PocketBook, Cervantes,
 reMarkable. It's a board for two people playing across a table — with a

@@ -77,7 +77,7 @@ function Layout.compute(opts)
     }
 end
 
-function Layout.puzzleActions(content_w, bottom_h)
+function Layout.puzzleActions(content_w, _bottom_h)
     local k=content_w/Design.master.content.w
     local function scaled(name) return Design.rect(Design.puzzle[name],k) end
     local y=Design.round(Design.puzzle.action_y,k); local h=Design.round(Design.puzzle.action_h,k)
