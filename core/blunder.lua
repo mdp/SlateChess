@@ -8,11 +8,13 @@ local Blunder = {}
 Blunder.__index = Blunder
 
 --- `game` is a core.game Game; `chance` is in [0, 1]; `rng` returns a
---- uniform value in [0, 1) (defaults to math.random).
+-- uniform value in [0, 1) — the injected `deps.rng` seam. The math.random
+-- fallback is the one sanctioned randomness site in core (the purity gate
+-- bans its use anywhere else).
 function Blunder:new(game, chance, rng)
     local o = setmetatable({}, self)
     o.game  = game
-    o.rng   = rng or math.random
+    o.rng   = rng or math.random -- luacheck: ignore 143
     o:setChance(chance)
     return o
 end

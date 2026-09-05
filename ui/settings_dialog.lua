@@ -88,10 +88,16 @@ function SettingsWidget:initializeState()
             and self.parent.board.check_hints == true) or false,
         rotate_top_pieces = (self.parent and self.parent.board
             and self.parent.board.rotate_top_pieces == true) or false,
+        flip_pieces_each_turn = (self.parent and self.parent.getSetting
+            and self.parent:getSetting("flip_pieces_each_turn", false) == true) or false,
         thinking_indicator = not (self.parent and self.parent.getSetting
             and self.parent:getSetting("thinking_indicator", true) == false),
         show_eval = (self.parent and self.parent.getSetting
             and self.parent:getSetting("show_eval", true) ~= false),
+        show_engine_elo = not (self.parent and self.parent.getSetting
+            and self.parent:getSetting("show_engine_elo", true) == false),
+        show_computer_captures = not (self.parent and self.parent.getSetting
+            and self.parent:getSetting("show_computer_captures", true) == false),
         show_hints = (self.parent and self.parent.getSetting
             and self.parent:getSetting("show_hints", false) == true),
         figurine_pgn = (self.parent and self.parent.getSetting
@@ -444,9 +450,12 @@ function SettingsWidget:buildInterfaceButton()
                     opponent_hints = self.changes.opponent_hints,
                     check_hints = self.changes.check_hints,
                     rotate_top_pieces = self.changes.rotate_top_pieces,
+                    flip_pieces_each_turn = self.changes.flip_pieces_each_turn,
                     thinking_indicator = self.changes.thinking_indicator,
                     show_eval = self.changes.show_eval,
                     show_hints = self.changes.show_hints,
+                    show_engine_elo = self.changes.show_engine_elo,
+                    show_computer_captures = self.changes.show_computer_captures,
                     figurine_pgn = self.changes.figurine_pgn,
                 },
                 onSave = function(saved)
@@ -456,9 +465,12 @@ function SettingsWidget:buildInterfaceButton()
                     self.changes.opponent_hints = saved.opponent_hints
                     self.changes.check_hints = saved.check_hints
                     self.changes.rotate_top_pieces = saved.rotate_top_pieces
+                    self.changes.flip_pieces_each_turn = saved.flip_pieces_each_turn
                     self.changes.thinking_indicator = saved.thinking_indicator
                     self.changes.show_eval = saved.show_eval
                     self.changes.show_hints = saved.show_hints
+                    self.changes.show_engine_elo = saved.show_engine_elo
+                    self.changes.show_computer_captures = saved.show_computer_captures
                     self.changes.figurine_pgn = saved.figurine_pgn
                     self:applyInterfaceChanges(saved)
                     self:markDirty()
@@ -495,22 +507,36 @@ function SettingsWidget:applyInterfaceChanges(s)
     if self.parent and self.parent.setSetting then
         local p = self.parent
         local prev_hints = p:getSetting("show_hints", false) and true or false
+        local prev_eval = p:getSetting("show_eval", true) ~= false
         p:setSetting("learning_mode", s.learning_mode and true or false)
         p:setSetting("show_selected", s.show_selected and true or false)
         p:setSetting("previous_move_hints", s.previous_move_hints and true or false)
         p:setSetting("opponent_hints", s.opponent_hints and true or false)
         p:setSetting("check_hints", s.check_hints and true or false)
         p:setSetting("rotate_top_pieces", s.rotate_top_pieces and true or false)
+        p:setSetting("flip_pieces_each_turn", s.flip_pieces_each_turn and true or false)
         p:setSetting("thinking_indicator", s.thinking_indicator ~= false)
         p:setSetting("show_eval", s.show_eval ~= false)
         p:setSetting("show_hints", s.show_hints and true or false)
+        p:setSetting("show_engine_elo", s.show_engine_elo ~= false)
+        p:setSetting("show_computer_captures", s.show_computer_captures ~= false)
         p:setSetting("figurine_pgn", s.figurine_pgn and true or false)
-        -- The Engine Hints line changes the bottom strip's height (a
-        -- third notation row), so the layout must be rebuilt when it
-        -- toggles; figurines only change the rendered glyphs, which
-        -- updateNotation picks up on the next repaint.
+        -- Piece orientation (the rotate preference and the hvh per-turn
+        -- flip) is derived by the parent; re-run it so the change lands on
+        -- the real board immediately.
+        if p.updateBoardOrientation and p.board then
+            p:updateBoardOrientation()
+            p.board:updateBoard()
+        end
+        -- The Engine Hints and eval lines change the strips' height
+        -- (both strips mirror each other), so the layout must be
+        -- rebuilt when one of them toggles; figurines only change the
+        -- rendered glyphs, which updateNotation picks up on the next
+        -- repaint.
         local new_hints = s.show_hints and true or false
-        if p.buildUILayout and p.board and new_hints ~= prev_hints then
+        local new_eval = s.show_eval ~= false
+        if p.buildUILayout and p.board
+            and (new_hints ~= prev_hints or new_eval ~= prev_eval) then
             p:buildUILayout()
             p:updateBoardOrientation()
             p.board:updateBoard()
@@ -640,48 +666,10 @@ function SettingsWidget:resetToDefaults()
 end
 function SettingsWidget:applyAndClose()
     local s = self.changes
-
-    local function applyTime(color)
-        local baseOld = self.clock.base[color] / 60
-        local incrOld = self.clock.increment[color]
-        local c = s.time_control[color]
-        if baseOld ~= c.base_minutes then
-            self.clock.base[color] = c.base_minutes * 60
-            self.clock.time[color] = c.base_minutes * 60
-        end
-        if incrOld ~= c.incr_seconds then
-            self.clock.increment[color] = c.incr_seconds
-        end
-    end
-    applyTime(Chess.WHITE)
-    applyTime(Chess.BLACK)
-
-    for _, color in ipairs({Chess.WHITE, Chess.BLACK}) do
-        if self.game:isHuman(color) ~= s.human_choice[color] then
-            self.game:setHuman(color, s.human_choice[color])
-        end
-    end
-
-    if self.parent and self.parent.setSetting then
-        local p = self.parent
-        p:setSetting("timed",          s.timed and true or false)
-        p:setSetting("human_white",    s.human_choice[Chess.WHITE])
-        p:setSetting("human_black",    s.human_choice[Chess.BLACK])
-        p:setSetting("learning_mode",  s.learning_mode and true or false)
-        p:setSetting("show_selected",  s.show_selected and true or false)
-        p:setSetting("previous_move_hints", s.previous_move_hints and true or false)
-        p:setSetting("opponent_hints", s.opponent_hints and true or false)
-        p:setSetting("check_hints", s.check_hints and true or false)
-        p:setSetting("rotate_top_pieces", s.rotate_top_pieces and true or false)
-        p:setSetting("thinking_indicator", s.thinking_indicator ~= false)
-        local wc = s.time_control[Chess.WHITE]
-        local bc = s.time_control[Chess.BLACK]
-        p:setSetting("time_base_white", wc.base_minutes * 60)
-        p:setSetting("time_base_black", bc.base_minutes * 60)
-        p:setSetting("time_incr_white", wc.incr_seconds)
-        p:setSetting("time_incr_black", bc.incr_seconds)
-    end
-
+    -- The App's onApply is the single mutation path now: it hands the
+    -- draft to the arbiter, which persists every accepted change and
+    -- emits the repaints. Nothing here mutates the game/clock/settings
+    -- directly anymore.
     if self.parent and self.parent.updateBoardOrientation then
         self.parent:updateBoardOrientation()
     end

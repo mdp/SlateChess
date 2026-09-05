@@ -33,13 +33,26 @@ local function is_color(color)
     return color == chess.WHITE or color == chess.BLACK
 end
 
---- Creates a Game. `opts.fen` optionally loads a position.
+--- Creates a Game. `opts.fen` optionally loads a position; when the FEN
+-- cannot be parsed the constructor returns nil (no silent fallback to the
+-- start position, which would make a corrupt record "playable").
 function Game:new(opts)
     opts = opts or {}
     local o = setmetatable({}, self)
     o.engine = chess()
     if opts.fen then
-        o.engine.load(opts.fen)
+        -- chess.load throws on some garbage but SILENTLY IGNORES other
+        -- unparseable FENs (keeping the start position), so the position
+        -- must be verified by round-tripping it back out of the engine:
+        -- the placement / active-color / castling fields have to match.
+        local ok = pcall(function() o.engine.load(opts.fen) end)
+        if not ok then return nil end
+        local want_p, want_a, want_c = opts.fen:match("^(%S+)%s+(%S+)%s+(%S+)")
+        local got = o.engine.fen() or ""
+        local got_p, got_a, got_c = got:match("^(%S+)%s+(%S+)%s+(%S+)")
+        if not want_p or got_p ~= want_p or got_a ~= want_a or got_c ~= want_c then
+            return nil
+        end
     end
     o.redo_stack = {}
     o._replaying_redo = false
@@ -140,6 +153,13 @@ end
 function Game:lastMove()
     local history = self.engine.history({ verbose = true })
     return history[#history]
+end
+
+--- The full move history as pretty move tables (color, from, to,
+-- piece, captured, promotion). The captured-pieces display replays
+-- this; see core.eval.
+function Game:moveHistory()
+    return self.engine.history({ verbose = true })
 end
 
 -- Playing moves --------------------------------------------------------------

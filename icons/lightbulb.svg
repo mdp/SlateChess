@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Hint bulb: a lightbulb that reveals the puzzle's next move.
+       Box == ink like menu.svg: the ink fills the viewBox so the
+       widget's box can align to a frame line. -->
+  <path style="fill:none;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-linejoin:round"
+        d="M 50,12 C 38,12 30,22 30,33.5 C 30,45 40,49 42,60 L 58,60 C 60,49 70,45 70,33.5 C 70,22 62,12 50,12 Z"/>
+  <path style="fill:none;stroke:#000000;stroke-width:5;stroke-linecap:round"
+        d="M 44,68 H 56 M 44,76 H 56 M 44,84 H 56"/>
+  <path style="fill:none;stroke:#000000;stroke-width:4;stroke-linecap:round"
+        d="M 50,26 V 34 M 40,30 L 44,34 M 60,30 L 56,34"/>
+</svg>

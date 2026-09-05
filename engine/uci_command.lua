@@ -6,7 +6,7 @@
 -- without dragging KOReader's widget tree in (engine.uci pulls that in
 -- via engine.process).
 --
--- The chal stall this pins down: clock-mode engines compute their
+-- The engine stall this pins down: clock-mode engines compute their
 -- budget from remaining time (our_time/20), so a go that accidentally
 -- OMITS movetime lets a timed game search for ~26s per move. These
 -- specs guarantee an explicitly budgeted move always says so on the

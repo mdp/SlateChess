@@ -10,7 +10,8 @@ end
 
 describe("Clock", function()
     it("starts with base times and stopped", function()
-        local clock = Clock:new({ base = { w = 300, b = 300 }, increment = { w = 5, b = 5 } })
+        local clock = Clock:new({ base = { w = 300, b = 300 }, increment = { w = 5, b = 5 } },
+            { now = function() return 0 end })
         assert.is_false(clock.running)
         assert.equals(300, clock:remaining("w"))
         assert.equals(300, clock:remaining("b"))

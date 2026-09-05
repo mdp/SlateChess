@@ -19,20 +19,21 @@
 local Blitbuffer = require("ffi/blitbuffer")
 local Screen = require("device").screen
 local Font = require("ui/font")
-local Geom = require("ui/geometry")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local TextWidget = require("ui/widget/textwidget")
 local TextBoxWidget = require("ui/widget/textboxwidget")
-local LineWidget = require("ui/widget/linewidget")
-
-local TIME_FONT_SIZE = 17    -- the far player's (top) time; nominal pts
+-- KOReader face sizes are nominal points and scale to framebuffer pixels;
+-- these produce approximately 38px / 60px on the 1080px design device.
+-- The opposition clock is intentionally one-third larger than the original
+-- 28px treatment so it remains readable across the board.
+local TIME_FONT_SIZE = 19
 -- Your own time is the bottom row and the one you glance at: 75% larger.
 local NEAR_FONT_SIZE = 30
-local CARD_PADDING = 3    -- around the two rows, nominal pts
-local CARD_RADIUS = 4
-local RULE_GAP = 2        -- between a time row and the rule
+local CARD_PADDING = 0
+local CARD_RADIUS = 0
+local RULE_GAP = 5        -- visual gap between the two clock lines
 local TIME_WIDTH_SLACK = 2
 
 --- Compact time text: MM:SS under an hour, H:MM:SS beyond it.
@@ -96,19 +97,11 @@ function ClockPanel.new(class, opts) -- luacheck: ignore 212
     -- The rule is exactly as wide as the times themselves -- a small
     -- line under the digits, not a shelf spanning the whole card. Its
     -- width tracks the currently shown times (see update).
-    local rule = LineWidget:new{
-        style      = "solid",
-        dimen      = Geom:new{ w = time_w, h = scale(1) },
-        background = Blitbuffer.COLOR_BLACK,
-    }
-
     local body = VerticalGroup:new{
         -- Right-aligned: the rule hugs the times' right edge, which
         -- is the card's right edge -- pinned to the board's end.
         align = "right",
         top,
-        VerticalSpan:new{ width = scale(RULE_GAP) },
-        rule,
         VerticalSpan:new{ width = scale(RULE_GAP) },
         bottom,
     }
@@ -155,15 +148,8 @@ function ClockPanel.new(class, opts) -- luacheck: ignore 212
         -- currently shown texts, never the theoretical maximum.
         -- Measured from the rendered widgets themselves, so the line
         -- underlines the digits exactly -- no probe metric drift.
-        local b_w = rows.black.vertical_string_list
-            and rows.black.vertical_string_list[1] or nil
-        local w_w = rows.white.vertical_string_list
-            and rows.white.vertical_string_list[1] or nil
-        rule.dimen.w = math.max(b_w and b_w.width or time_w,
-            w_w and w_w.width or time_w)
-        -- The rule's width changed: the group caches child offsets at
-        -- first layout, so invalidate them or the rule stays put.
-        body:resetLayout()
+        -- Keep the group stable: right alignment makes both rendered strings
+        -- share the clock stack's right edge.
     end
 
     local logger = require("logger")

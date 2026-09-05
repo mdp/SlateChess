@@ -2,7 +2,7 @@
 --
 -- The command line is the contract between the app and the engine:
 -- every field omitted or present here changes how long the engine
--- searches. The chal stall (clock mode computing a ~45s budget because
+-- searches. The engine stall (clock mode computing a ~45s budget because
 -- a missing movetime looked like "no limit") is exactly the failure
 -- mode these assertions pin down: an explicit movetime must ALWAYS
 -- appear when the app sends one.

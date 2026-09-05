@@ -1,4 +1,4 @@
--- Async UCI wrapper for the plugin's chess engines (chal, or any UCI
+-- Async UCI wrapper for the plugin's chess engines (Berserk, or any UCI
 -- binary such as Stockfish).
 
 local Utils  = require("engine.process")

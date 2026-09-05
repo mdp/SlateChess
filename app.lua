@@ -14,6 +14,7 @@ local Screen = Device.screen
 local Blitbuffer = require("ffi/blitbuffer")
 local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
+local time = require("ui/time")
 local lfs = require("libs/libkoreader-lfs")
 local Font = require("ui/font")
 local Size = require("ui/size")
@@ -25,12 +26,10 @@ local json = require("json")
 local logger = require("logger")
 
 local CenterContainer = require("ui/widget/container/centercontainer")
-local BottomContainer = require("ui/widget/container/bottomcontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local RightContainer = require("ui/widget/container/rightcontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local VerticalGroup = require("ui/widget/verticalgroup")
-local TitleBarWidget = require("ui/widget/titlebar")
 local TextWidget = require("ui/widget/textwidget")
 local ButtonWidget = require("ui/widget/button")
 local ButtonDialog = require("ui/widget/buttondialog")
@@ -45,23 +44,25 @@ local PathChooser = require("ui/widget/pathchooser")
 local ConfirmBox = require("ui/widget/confirmbox")
 
 local Game = require("core.game")
-local Clock = require("core.clock")
 local Eval = require("core.eval")
 local Openings = require("core.openings")
-local Blunder = require("core.blunder")
 local Uci = require("engine.uci")
 local ChessBoard = require("ui.board")
 local ClockPanel = require("ui.clock_panel")
 local PlayerStrip = require("ui.player_strip")
+local CaptureGutter = require("ui.capture_gutter")
+local CapturedStrip = require("ui.captured_strip")
+local ComputerHud = require("ui.computer_hud")
+local OverlapGroup = require("ui/widget/overlapgroup")
 local SettingsWidget = require("ui.settings_dialog")
+local Arbiter = require("core.arbiter")
 local MarksOverlay = require("ui.marks_overlay")
+local GameplayFrame = require("ui.gameplay_frame")
+local HudRule = require("ui.hud_rule")
+local GameplayDesign = require("ui.gameplay_design")
 local _ = require("gettext")
 
 local WHITE, BLACK = Game.WHITE, Game.BLACK
-
--- Minimum seconds between the engine starting to think and its move landing
--- on the board, so fast replies never look instantaneous.
-local MIN_ENGINE_MOVE_DELAY = 1
 
 -- Paths ---------------------------------------------------------------------
 
@@ -135,19 +136,18 @@ end
 
 local function getEnginePath()
     -- Engine binaries live here, named per platform:
-    --   chal          -- the Kindle build (Linux ARM, musl static)
-    --   chal-arm64    -- the macOS build
+    --   berserk          -- the Kindle build (Linux ARM, musl static)
+    --   berserk-arm64    -- the macOS build
     --   stockfish     -- optional Stockfish fallback (Linux ARM)
     --   stockfish-arm64, stockfish-x64 -- optional Stockfish fallbacks
-    -- Chal is the primary engine: a ~75KB UCI engine with proper evals
-    -- (see engines/chal.c), small enough for any device and fast enough
-    -- for the emulator.  Stockfish binaries are honoured when present.
+    -- Berserk is the primary engine. Stockfish binaries are honoured as
+    -- fallbacks when present.
     local arch = jit and jit.arch and jit.arch:gsub("%W", "") or nil
     local candidates = {}
     if arch then
-        candidates[#candidates + 1] = "chal-" .. arch
+        candidates[#candidates + 1] = "berserk-" .. arch
     end
-    candidates[#candidates + 1] = "chal"
+    candidates[#candidates + 1] = "berserk"
     if arch then
         candidates[#candidates + 1] = "stockfish-" .. arch
     end
@@ -187,9 +187,7 @@ local LOG_FONT_SIZE = 14
 -- chrome heights, board cell, clock gutter) is decided by ui/layout.lua
 -- and consumed here; see that module for the frame contract.
 local Layout = require("ui.layout")
-local FRAME_PAD = Screen:scaleBySize(Layout.FRAME_PAD_PTS)
-
-
+local FRAME_PAD = Layout.SIDE_PAD
 
 -- Icons (IconWidget only searches KOReader's data dir, so the SVGs are
 -- copied there at startup; UI code resolves them via ui.icons) ---------------
@@ -251,7 +249,11 @@ local App = FrameContainer:extend{
     -- The frame: the content box is the glass inset by FRAME_PAD on
     -- all four sides; every element's ink aligns to its edges (see
     -- ui/layout.lua).
-    padding = FRAME_PAD,
+    padding = 0,
+    padding_left = FRAME_PAD,
+    padding_right = FRAME_PAD,
+    padding_top = Layout.VERTICAL_PAD,
+    padding_bottom = Layout.VERTICAL_PAD,
     full_width = Screen:getWidth(),
     full_height = Screen:getHeight(),
     notation_font = LOG_FONT,
@@ -259,7 +261,7 @@ local App = FrameContainer:extend{
 }
 
 function App:init()
-    self.dimensions = Geometry:new{ w = self.full_width, h = self.full_height }
+    self:applyScreenGeometry(self.full_width, self.full_height)
     self.covers_fullscreen = true
     Dispatcher:registerAction("slatechess", {
         category = "none", event = "SlateChessStart", title = _("SlateChess"), general = true,
@@ -276,10 +278,44 @@ function App:init()
     self.settings = LuaSettings:open(settings_path)
 end
 
+function App:applyScreenGeometry(w, h)
+    GameplayFrame.applyGeometry(self, w, h)
+end
+
+-- SDL broadcasts both events while the emulator window is being resized.
+-- Rebuild once per distinct framebuffer size so all hit targets and rendered
+-- geometry continue to match the live glass instead of the launch size.
+function App:onSetDimensions(dimen)
+    if not dimen or (dimen.w == self.full_width and dimen.h == self.full_height) then
+        return false
+    end
+    local old = self[1]
+    self:applyScreenGeometry(dimen.w, dimen.h)
+    if self.game then
+        self:buildUILayout()
+        self:updateBoardOrientation()
+        self.board:updateBoard()
+        self:updateTimerDisplay()
+    end
+    if old and old ~= self[1] and old.free then old:free() end
+    UIManager:setDirty(self, "full")
+    return true
+end
+
+App.onScreenResize = App.onSetDimensions
+
 function App:onSlateChessStart()
     self:startGame()
     return true
 end
+
+-- App is a FrameContainer, not an InputContainer, so `ges_events` would
+-- never be evaluated here. Handle the raw KOReader Gesture event directly.
+function App:onGesture(ges)
+    return GameplayFrame.gesture(self, ges)
+end
+
+function App:openGameplayMenu() return self:openGameMenu() end
 
 function App:handleEvent(event)
     -- Dispatcher can launch the game while this widget is not on the stack.
@@ -299,6 +335,7 @@ function App:handleEvent(event)
 end
 
 function App:onCloseWidget()
+    self._closed = true
     self.marks = nil
     if self.board then self.board:clearValidMoves() end
     self:stopClockTicker()
@@ -323,8 +360,13 @@ function App:addToMainMenu(menu_items)
                 ok_text = _("Restart engine"),
                 ok_callback = function()
                     self:stopSearch()
+                    -- Tell the arbiter the engine is being torn down and
+                    -- respawned; the next uciok re-arms options and
+                    -- relaunches whatever is on move.
+                    if self.arbiter then
+                        self:dispatch(self.arbiter:transition{ kind = "engine_restart" })
+                    end
                     self:shutdownEngine()
-                    -- The uciok handler relaunches whatever is on move.
                     self:startEngine()
                 end,
             })
@@ -375,7 +417,7 @@ function App:getEngineStatusText()
     if not UCI_ENGINE_PATH then
         return "No engine binary found.\n"
             .. "Looked in " .. ENGINES_DIR .. "/ for\n"
-            .. "chal[-<arch>] or stockfish[-<arch>]."
+            .. "berserk[-<arch>] or stockfish[-<arch>]."
     end
     if self.engine and self.engine.state and self.engine.state.uciok then
         return "Engine is ready: " .. UCI_ENGINE_PATH
@@ -395,46 +437,235 @@ end
 function App:startGame()
     self.last_cp = nil
     self.last_mate = nil
-    self.eval_turn = nil
     self.eval_history = {}
-    self._analysis_active = false
     self.running = false
+    self._closed = false
+    self._arb_slots = {}
 
     if UIManager.isWidgetShown and UIManager:isWidgetShown(self) then
         UIManager:close(self)
+        -- onCloseWidget latches _closed; re-arm the driver for the fresh
+        -- session before any dispatch.
+        self._closed = false
+        self._arb_slots = {}
     end
 
     self:loadEngineSettings()
-    self:newGame()
-    self:startEngine()
     self:loadOpenings()
+    -- The Arbiter owns game/clock/roles/search. Build it from the settings
+    -- snapshot, feed it the restore bundle, and let its effects drive us.
+    self.arbiter = Arbiter:new(self:readArbCfg(), {
+        -- UIManager:getTime() is monotonic fts (µs since boot); the
+        -- clock contract is seconds, so convert once here.
+        now = function()
+            return time.to_s(UIManager:getTime())
+        end,
+        rng = function() return math.random() end,
+    })
+    self:dispatch(self.arbiter:transition{ kind = "start", restore = self:readRestore() })
+    self:startEngine()
     self:buildUILayout()
-    self:updateTimerDisplay()
-    self:restoreGameState()
     self:updateBoardOrientation()
     self.board:updateBoard()
+    self:updateTimerDisplay()
     UIManager:show(self)
-    self:launchComputerMove()
 end
 
---- Creates the Game, the Clock and the Blunder damper from settings.
-function App:newGame()
-    self.game = Game:new()
-    self.game:setHuman(WHITE, self:getSetting("human_white", true))
-    self.game:setHuman(BLACK, self:getSetting("human_black", false))
-    self.timed = self:getSetting("timed", false) and true or false
-    self.clock = Clock:new{
-        base = {
-            w = self:getSetting("time_base_white", 900),
-            b = self:getSetting("time_base_black", 900),
-        },
-        increment = {
-            w = self:getSetting("time_incr_white", 10),
-            b = self:getSetting("time_incr_black", 10),
-        },
+--- Settings snapshot the Arbiter starts from (one faithful read of the
+--- persisted settings). The arbiter then persists every change it accepts.
+function App:readArbCfg()
+    local s = self.settings
+    return {
+        human_white         = s:readSetting("human_white", true),
+        human_black         = s:readSetting("human_black", false),
+        timed               = s:readSetting("timed", false),
+        time_base_white     = tonumber(s:readSetting("time_base_white", 900)) or 900,
+        time_base_black     = tonumber(s:readSetting("time_base_black", 900)) or 900,
+        time_incr_white     = tonumber(s:readSetting("time_incr_white", 10)) or 10,
+        time_incr_black     = tonumber(s:readSetting("time_incr_black", 10)) or 10,
+        skill_level         = self.current_skill,
+        engine_depth        = self.engine_depth,
+        engine_movetime     = self.engine_movetime,
+        blunder_chance      = self.blunder_chance,
+        flip_board          = s:readSetting("flip_board", false),
+        rotate_top_pieces   = s:readSetting("rotate_top_pieces", false),
+        flip_pieces_each_turn = s:readSetting("flip_pieces_each_turn", false),
+        show_eval           = s:readSetting("show_eval", true),
+        show_hints          = s:readSetting("show_hints", false),
+        figurine_pgn        = s:readSetting("figurine_pgn", false),
+        thinking_indicator  = s:readSetting("thinking_indicator", true),
+        learning_mode       = s:readSetting("learning_mode", false),
+        show_selected       = s:readSetting("show_selected", true),
+        previous_move_hints = s:readSetting("previous_move_hints", true),
+        opponent_hints      = s:readSetting("opponent_hints", false),
+        check_hints        = s:readSetting("check_hints", false),
+        saved_pgn          = s:readSetting("saved_pgn", "") or "",
+        saved_time_white   = tonumber(s:readSetting("saved_time_white", nil)),
+        saved_time_black   = tonumber(s:readSetting("saved_time_black", nil)),
+        saved_running      = s:readSetting("saved_running", false),
+        openings           = self.openings,
     }
-    self.running = false
-    self.blunderer = Blunder:new(self.game, self.blunder_chance or 0.0)
+end
+
+--- Read the restore bundle (nil when there is no saved game).
+function App:readRestore()
+    local s = self.settings
+    local pgn = s:readSetting("saved_pgn", "")
+    if not pgn or pgn == "" then return nil end
+    return {
+        pgn     = pgn,
+        t_w     = tonumber(s:readSetting("saved_time_white", nil)),
+        t_b     = tonumber(s:readSetting("saved_time_black", nil)),
+        running = s:readSetting("saved_running", false),
+    }
+end
+
+--- Mirrors the arbiter's authoritative references back into the legacy
+--- render code (updateNotation/buildUILayout/updateTimerDisplay/
+--- updateBoardOrientation read self.game/self.clock/self.running/
+--- self.eval_history/self.last_cp ...).
+function App:syncFromArbiter()
+    local a = self.arbiter
+    if not a then return end
+    self.game            = a.game
+    self.clock           = a.clock
+    self.timed           = a:cfgbool("timed")
+    self.running         = a.running
+    self.eval_history    = a.eval_history
+    self.last_cp         = a._current_cp
+    self.last_mate       = a._current_mate
+    self.current_skill   = a.cfg.skill_level
+    self.engine_depth    = a.cfg.engine_depth
+    self.engine_movetime = a.cfg.engine_movetime
+    self.blunder_chance  = a.cfg.blunder_chance
+end
+
+--- Performs the canonical-ordered effect list from a transition. Effects
+--- run in order, so persist writes land before repaints read them back.
+function App:dispatch(fx)
+    if self._closed or not self.arbiter then return end
+    self:syncFromArbiter()
+    for _, e in ipairs(fx or {}) do
+        local kind = e.kind
+        if kind == "persist" then
+            self:setSetting(e.key, e.value)
+        elseif kind == "uci" then
+            self:performUci(e)
+        elseif kind == "cancel" then
+            self:performCancel(e.token)
+        elseif kind == "schedule" then
+            self:performSchedule(e.token, e.delay)
+        elseif kind == "repaint" then
+            self:performRepaint(e.target)
+        elseif kind == "announce" then
+            self:performAnnounce(e)
+        end
+    end
+end
+
+--- Performs one `uci` effect on the engine process.
+function App:performUci(e)
+    local engine = self.engine
+    if not (engine and engine.state and engine.state.uciok) then return end
+    local cmd = e.cmd
+    if cmd == "setoption" then
+        engine:setOption(e.name, e.value)
+    elseif cmd == "ucinewgame" then
+        engine:ucinewgame()
+    elseif cmd == "position" then
+        engine:position({ moves = e.moves })
+    elseif cmd == "go" then
+        -- The engine has no notion of our go ids; whatever bestmove lands
+        -- next answers this search.
+        self._current_go_id = e.id
+        engine:go(e.spec)
+    elseif cmd == "stop" then
+        engine:stop()
+    end
+end
+
+--- Arms an arbiter timer on the UI scheduler and re-enters the funnel.
+function App:performSchedule(token, delay)
+    local en = { dead = false }
+    self._arb_slots[token] = en
+    local fn = function()
+        if en.dead or self._closed or not self.arbiter then return end
+        if self._arb_slots[token] ~= en then return end
+        self._arb_slots[token] = nil
+        self:dispatch(self.arbiter:transition{ kind = "scheduled", token = token })
+    end
+    en.fn = fn
+    UIManager:scheduleIn(delay, fn)
+end
+
+function App:performCancel(token)
+    local en = self._arb_slots and self._arb_slots[token]
+    if not en then return end
+    en.dead = true
+    if en.fn then UIManager:unschedule(en.fn) end
+    self._arb_slots[token] = nil
+end
+
+--- Performs a repaint target: layout/board/clocks/notation.
+function App:performRepaint(target)
+    if not self.board then return end
+    if target == "layout" then
+        self:buildUILayout()
+        self:updateBoardOrientation()
+        self.board:updateBoard()
+        self:updateTimerDisplay()
+    elseif target == "board" then
+        self:syncBoardFlags()
+        self:updateBoardOrientation()
+        self.board:updateBoard()
+        self.board:markCheckHint()
+    elseif target == "clocks" then
+        self:updateTimerDisplay()
+    elseif target == "notation" then
+        self:updateNotation()
+        if self.arbiter then
+            local v = self.arbiter:view()
+            if self.hints_widgets then
+                for _, w in ipairs(self.hints_widgets) do w:setText(v.hints_text) end
+            end
+        end
+    end
+    UIManager:setDirty(self, "ui")
+end
+
+--- Reasserts the board's interface toggles from the persisted settings
+--- (the arbiter persists them; the board reads them only at build time).
+function App:syncBoardFlags()
+    local board = self.board
+    if not board then return end
+    board.learning_mode        = self:getSetting("learning_mode", false)
+    board.show_selected        = self:getSetting("show_selected", true)
+    board.previous_move_hints  = self:getSetting("previous_move_hints", true)
+    board.opponent_hints       = self:getSetting("opponent_hints", false)
+    board.check_hints          = self:getSetting("check_hints", false)
+end
+
+--- Performs an announce effect.
+function App:performAnnounce(e)
+    if e.announce_kind == "game_over" then
+        UIManager:show(ConfirmBox:new{
+            text = e.text,
+            ok_text = _("Continue"),
+            cancel_text = nil,
+            ok_callback = function()
+                if self.arbiter then
+                    self:dispatch(self.arbiter:transition{ kind = "reset" })
+                end
+                self:updateNotation()
+                UIManager:setDirty(self, "ui")
+            end,
+        })
+    elseif e.announce_kind == "engine_failed" then
+        self:markEngineInvalid(e.text)
+        UIManager:setDirty(self, "ui")
+    elseif e.announce_kind == "error" then
+        UIManager:show(InfoMessage:new{ text = e.text })
+    end
 end
 
 function App:loadOpenings()
@@ -452,7 +683,7 @@ function App:markEngineInvalid(reason)
     self.engine_status_text = reason or "Engine is not ready."
 end
 
---- Starts the chess engine subprocess (chal, or Stockfish when its
+--- Starts the chess engine subprocess (Berserk, or Stockfish when its
 --- binary is present instead). There is no Lua fallback: without an
 --- engine there are no evals, no hints and no computer opponent --
 --- the diagnostics dialog explains what to install.
@@ -464,7 +695,7 @@ function App:startEngine()
         self:markEngineInvalid(
             "No engine binary found for this platform.\n"
             .. "Copy the engine binary to:\n" .. ENGINES_DIR .. "/"
-            .. "\n(stockfish-<arch>, e.g. stockfish-arm64, or stockfish)")
+            .. "\n(berserk-<arch>, e.g. berserk-arm64, or berserk)")
         return
     end
 
@@ -478,7 +709,8 @@ function App:startEngine()
     engine:uci()
 end
 
---- One event wiring for both engine implementations.
+--- One event wiring for both engine implementations. Every line the engine
+--- speaks becomes an arbiter event; the arbiter's effects drive the engine.
 function App:wireEngineHandlers(engine)
     engine:on("read", function(data)
         if self.engine ~= engine then return end
@@ -488,9 +720,8 @@ function App:wireEngineHandlers(engine)
             logger.dbg("slatechess: engine <", line)
             if line:match("execvp failed") then
                 self:markEngineInvalid(line)
-            else
-                self:captureEval(line)
-                self:captureHints(line)
+            elseif self.arbiter then
+                self:dispatch(self.arbiter:transition{ kind = "engine_info", line = line })
             end
         end
     end)
@@ -498,110 +729,57 @@ function App:wireEngineHandlers(engine)
     engine:on("uciok", function()
         if self.engine ~= engine then return end
         self.engine_status_text = nil
-        self:applyEngineOptions(engine)
-        engine:ucinewgame()
-
-        if not (self:getSetting("saved_pgn", "") or ""):match("%S") then
-            self:updateNotation()
+        if self.arbiter then
+            self:dispatch(self.arbiter:transition{ kind = "engine_ready" })
         end
-
-        -- Restored computer-vs-computer games resume once UCI is ready.
-        if self.game:isComputerVsComputer() and self.running then
-            self:syncEnginePosition()
-            engine.send("isready")
-            self:launchNextMove()
-        else
-            engine.send("isready")
-        end
-
         UIManager:setDirty(self, "ui")
-        if self.game and not self.game:isHuman(self.game:turn()) then
-            UIManager:nextTick(function() self:launchComputerMove() end)
-        end
-        -- A human on move with an empty board gets no analysis: the
-        -- eval and hints wait for the start of play (see launchAnalysis).
     end)
 
     engine:on("bestmove", function(move_uci)
         if self.engine ~= engine then return end
-        -- Route by which search this go belonged to: analysis searches
-        -- only refresh the eval; move searches play the move.
-        if self._go_kind == "analysis" then
-            self._analysis_active = false
-            self._go_kind = nil
-            self:commitEval(self._analysis_ply)
-            self:commitHints(move_uci)
-            return
-        end
-        self._go_kind = nil
-        self.engine_busy = false
-        self._search_watchdog = nil
-        self:stopThinkingIndicator()
-        -- The search evaluated the position as it stood at launch; an
-        -- undo since then makes the result stale.
-        self:commitEval(self._search_ply)
-        if self.game:isHuman(self.game:turn()) then return end
-
-        -- Guarantee a minimum visible pause before the engine's move lands,
-        -- so instant replies still read as a deliberate move rather than
-        -- an involuntary jump.
-        local now = UIManager:getTime()
-        local elapsed = now - (self._search_started_at or now)
-        local delay = math.max(0, MIN_ENGINE_MOVE_DELAY - elapsed)
-        local function apply()
-            if self.engine ~= engine then return end
-            if self.game:isHuman(self.game:turn()) then return end
-            self:applyEngineMove(move_uci)
-        end
-        if delay > 0.05 then
-            UIManager:scheduleIn(delay, apply)
-        else
-            apply()
+        if self.arbiter then
+            self:dispatch(self.arbiter:transition{
+                kind = "engine_bestmove",
+                id   = self._current_go_id,
+                move = move_uci,
+            })
         end
     end)
 
     engine:on("process_error", function(err)
         if self.engine ~= engine then return end
-        self.engine_busy = false
-        self:markEngineInvalid(err or "Engine process failed.")
+        if self.arbiter then
+            self:dispatch(self.arbiter:transition{ kind = "engine_failed",
+                reason = err or "Engine process failed." })
+        else
+            self:markEngineInvalid(err or "Engine process failed.")
+        end
     end)
 
     engine:on("uci_timeout", function(last_output)
         if self.engine ~= engine then return end
         local text = "Timed out waiting for the engine's UCI response."
         if last_output and last_output ~= "" then text = text .. "\n" .. last_output end
-        self:markEngineInvalid(text)
+        if self.arbiter then
+            self:dispatch(self.arbiter:transition{ kind = "engine_failed", reason = text })
+        else
+            self:markEngineInvalid(text)
+        end
     end)
 
     engine:on("go_timeout", function(last_output)
         if self.engine ~= engine then return end
-        self.engine_busy = false
-        self._go_kind = nil
-        self._analysis_active = false
-        self:stopThinkingIndicator()
         local text = "Timed out waiting for the engine's bestmove."
         if last_output and last_output ~= "" then text = text .. "\n" .. last_output end
-        self:markEngineInvalid(text)
+        if self.arbiter then
+            self:dispatch(self.arbiter:transition{ kind = "search_timeout", detail = text })
+        else
+            self:markEngineInvalid(text)
+        end
     end)
 end
 
---- UCI options applied when the engine becomes ready.
-function App:applyEngineOptions(engine)
-    engine.send("setoption name Hash value 8")
-    engine.send("setoption name Threads value 1")
-    engine.send("setoption name Skill Level value " .. tostring(self.current_skill or 0))
-    engine.send("setoption name Move Overhead value 150")
-    engine.send("setoption name Ponder value false")
-    engine.send("setoption name Slow Mover value 90")
-    engine.send("setoption name MultiPV value 1")
-    self.current_skill = self.current_skill or 0
-end
-
 function App:shutdownEngine()
-    self._pending_launch = nil
-    self:stopThinkingIndicator()
-    self.engine_busy = false
-    self._analysis_active = false
     if self.engine and not self.engine.closed then
         self.engine:quit()
     end
@@ -609,162 +787,26 @@ function App:shutdownEngine()
 end
 
 function App:stopSearch()
-    self._pending_launch = nil
-    self:stopThinkingIndicator()
-    self.engine_busy = false
+    -- Defensive halt used by the diagnostics restart path; the arbiter
+    -- normally serializes engine traffic through its own effects.
     if self.engine and not self.engine.closed and self.engine.state.uciok then
         self.engine:stop()
     end
 end
 
---- Keeps the engine's position in sync with the game history.
-function App:syncEnginePosition()
-    if not (self.engine and self.engine.state and self.engine.state.uciok) then return end
-    self.engine:position({ moves = self.game:uciMoveString() })
-end
-
--- Eval capture --------------------------------------------------------------------
-
---- Extracts the evaluation from one UCI "info" line (principal variation
---- only), converting it to White's perspective.
-function App:captureEval(line)
-    local info = Eval.parseInfo(line)
-    if not info then return end
-    if info.mate ~= nil then
-        self.last_mate = Eval.toWhitePerspective(info.mate, self.eval_turn)
-        self.last_cp = nil
-    elseif info.cp ~= nil then
-        self.last_cp = Eval.toWhitePerspective(info.cp, self.eval_turn)
-        self.last_mate = nil
-    end
-end
-
---- Commits the latest captured eval to the per-ply history at `ply`,
---- provided the game is still at that ply -- an undo (or game reset)
---- during the search makes the result stale and it is dropped.
-function App:commitEval(ply)
-    if not self.eval_history or not self.game then return end
-    if ply ~= #(self.game:sanHistory()) then return end
-    if self.last_cp == nil and self.last_mate == nil then return end
-    self.eval_history[ply] = { cp = self.last_cp, mate = self.last_mate }
-    self:updateNotation()
-end
-
---- Captures per-PV data from "info" lines while the background analysis
---- runs, feeding the Engine Hints line (the top two recommendations).
---- Scores convert to White's perspective exactly like captureEval.
-function App:captureHints(line)
-    if not self._analysis_active then return end
-    if not (self.hints_widget and self:getSetting("show_hints", false)) then return end
-    local info = Eval.parsePv(line)
-    if not info then return end
-    self._hint_pvs = self._hint_pvs or {}
-    self._hint_pvs[info.multipv] = {
-        move = info.move,
-        cp   = info.cp ~= nil and Eval.toWhitePerspective(info.cp, self.eval_turn) or nil,
-        mate = info.mate ~= nil and Eval.toWhitePerspective(info.mate, self.eval_turn) or nil,
-    }
-end
-
---- Renders the Engine Hints line from the PVs captured during the
---- analysis that just finished: up to the top two moves, each with its
---- eval ("Nf3 +0.35   d4 +0.28"). `bestmove_uci` backs up PV 1 when the
---- engine reported no multipv lines. A stale result -- undo or reset
---- mid-search -- clears the line instead.
-function App:commitHints(bestmove_uci)
-    local widget = self.hints_widget
-    if not widget then return end
-    if not self:getSetting("show_hints", false) then return end
-    if self._analysis_ply ~= #(self.game:sanHistory()) then
-        widget:setText("")
-        return
-    end
-    local pvs = self._hint_pvs or {}
-    self._hint_pvs = nil
-
-    local function entry(i)
-        local pv = pvs[i]
-        local uci = (pv and pv.move) or (i == 1 and bestmove_uci) or nil
-        if not uci then return nil end
-        local cp, mate = pv and pv.cp or nil, pv and pv.mate or nil
-        if i == 1 and cp == nil and mate == nil then
-            cp, mate = self.last_cp, self.last_mate
-        end
-        local san = self:uciToSan(uci)
-        local ev = Eval.short{ cp = cp, mate = mate }
-        return (ev ~= "") and (san .. " " .. ev) or san
-    end
-
-    local parts = {}
-    for i = 1, 2 do
-        local txt = entry(i)
-        if txt then parts[#parts + 1] = txt end
-    end
-    widget:setText(table.concat(parts, "   "))
-    UIManager:setDirty(self, "ui")
-end
-
---- SAN for a UCI token in the current position ("e2e4" -> "Nf3"),
---- matched against the verbose legal-move list, which carries .san.
---- Falls back to the raw token if the position moved on.
-function App:uciToSan(uci)
-    for _, m in ipairs(self.game:legalMoves({ verbose = true })) do
-        if m.from .. m.to .. (m.promotion or "") == uci then return m.san end
-    end
-    return uci
-end
-
---- Short background search that refreshes the eval without moving.
---- Runs whenever a human is on move; when the computer is thinking, its
---- own search commits the eval as a side effect. Never races the move
---- search: if the engine is busy, the running search commits instead.
-function App:launchAnalysis()
-    if not (self.engine and self.engine.state and self.engine.state.uciok) then return end
-    -- A fresh board gets no eval or suggested moves: they'd imply a
-    -- verdict before anyone has played. Play starts the analysis --
-    -- onMoveExecuted relaunches it after every ply.
-    if #(self.game:sanHistory()) == 0 then return end
-    if self.engine_busy or self._analysis_active then return end
-    self._analysis_active = true
-    self._analysis_ply = #(self.game:sanHistory())
-    self.eval_turn = self.game:turn()
-    self._hint_pvs = nil
-    -- Blank the hints line while a fresh analysis runs: hints from the
-    -- previous position would read as current ones.
-    if self.hints_widget then self.hints_widget:setText("") end
-    local hints = self.hints_widget and self:getSetting("show_hints", false)
-    self:syncEnginePosition()
-    -- Analysis runs at FULL strength: the skill handicap is a global
-    -- engine option, and a 600-ELO analysis both suggests bad hint moves
-    -- and reports garbage evals. launchSearch restores the player's
-    -- skill before every real move search.
-    self.engine.send("setoption name Skill Level value 20")
-    -- With Engine Hints on, the analysis doubles as the hint search:
-    -- two PVs, deeper than the eval-only pass (time-capped by movetime,
-    -- so slow devices reach less depth, never more time).
-    if hints then
-        self.engine.send("setoption name MultiPV value 2")
-    end
-    -- Route the bestmove to the analysis handler: chal has no multipv
-    -- token, so the bestmove handler keys off this tag, not off flags.
-    self._go_kind = "analysis"
-    self.engine:go{ depth = hints and 10 or 2, movetime = hints and 1000 or 300 }
-end
-
-function App:resetEval()
-    self.last_cp = nil
-    self.last_mate = nil
-    self.eval_turn = nil
-    self.eval_history = {}
-end
+-- Eval hooks ---------------------------------------------------------------------
 
 -- Board orientation (derived state) --------------------------------------------------
 
---- The board faces the side to move in human-vs-human play while the game
---- runs; otherwise it faces the human (white by default).
+--- The side the board renders for. "Flip pieces to player on each turn"
+--- (human-vs-human only) rotates the whole board toward the side to move
+--- while the game runs; off (default) keeps a fixed board that renders
+--- for white. The face-color machinery stays on the board widget either
+--- way — this just decides which face drives it.
 function App:currentFaceColor()
     local game = self.game
-    if game and self.running and game:isHumanVsHuman() then
+    if game and self.running and game:isHumanVsHuman()
+        and self:getSetting("flip_pieces_each_turn", false) then
         return game:turn()
     end
     return WHITE
@@ -782,29 +824,33 @@ function App:shouldFlipBoard()
 end
 
 --- Flip Board menu item: swap which player's side sits at the bottom.
---- Rebuilds the layout because the two player strips trade places (and
---- their rotation), and re-derives the board's flipped grid.
+--- The arbiter toggles and persists the preference; the flip moves the
+--- layout signature, so its layout-repaint rebuilds everything.
 function App:toggleBoardFlip()
-    self:setSetting("flip_board", not (self:getSetting("flip_board", false) and true or false))
-    self:buildUILayout()
-    self:updateBoardOrientation()
-    self.board:updateBoard()
-    self:updateTimerDisplay()
-    self:updateNotation()
-    UIManager:setDirty(self, "ui")
+    if not self.arbiter then return end
+    self:dispatch(self.arbiter:transition{ kind = "flip_toggle" })
 end
 
 --- Re-derives orientation from the game and repaints once.
 function App:updateBoardOrientation()
     if not (self.board and self.game) then return end
     local hvh = self.game:isHumanVsHuman()
+    local flip_each_turn = self:getSetting("flip_pieces_each_turn", false) and true or false
     self.board:setFlipped(self:shouldFlipBoard())
     -- The player strips follow the flip (which side sits at the bottom
     -- is decided in buildUILayout); the clock cards keep their fixed
     -- row order, so each player's own time stays nearest them in both
     -- positions.
-    local rotate_pref = self:getSetting("rotate_top_pieces", false) and true or false
-    self.board.rotate_top_pieces = (not hvh) and rotate_pref or false
+    -- Piece angles: human-vs-human either pivots the whole board toward
+    -- the side to move each turn ("Flip pieces to player on each turn"
+    -- on) or keeps a fixed board with each side's far pieces angled
+    -- toward their own player (off). In one-player mode both armies face
+    -- the sole human at the bottom.
+    if hvh then
+        self.board.rotate_top_pieces = (not flip_each_turn) and true or false
+    else
+        self.board.rotate_top_pieces = false
+    end
     self.board:setFaceColor(self:currentFaceColor())
 end
 
@@ -816,8 +862,7 @@ end
 -- Layout -------------------------------------------------------------------------------
 
 function App:buildUILayout()
-    local status_bar = self:createStatusBar()
-    local status_h   = status_bar:getSize().h
+    local status_h = 0
 
     -- One geometry decision for the whole screen: ui/layout.lua owns
     -- the FRAME_PAD frame, the margin lines, the chrome heights and the
@@ -834,50 +879,57 @@ function App:buildUILayout()
     -- would show on untimed games.
     local timed = self.timed and self.clock ~= nil
 
-    -- Chess clocks (timed games only): two compact cards, one per
-    -- player strip. Both cards always paint upright and show both
-    -- times; the strip rotates Black's whole bracket (card included)
-    -- for the player sitting on Black's side. Positions are fixed to
-    -- the board's grid and do not follow its flips.
+    -- Both player strips always exist -- one per side, the top one
+    -- rotated 180° -- in every game mode, so each side always has its
+    -- own bracket right side up. Which player's strip sits at the
+    -- bottom (nearest the reader) follows the board flip: unflipped,
+    -- White's side is at the bottom; flipped, Black's.
+    local white_at_bottom = not self:shouldFlipBoard()
+    local strip_colors = { WHITE, BLACK }
+
+    -- Chess clocks (timed games only): one compact card per player
+    -- strip. Cards always paint upright and show both times; the
+    -- strip rotates the top bracket (card included) for the player
+    -- sitting on the far side. Positions are fixed to the board's
+    -- grid and do not follow its flips.
     self.clock_panels = nil
     local card_h = 0
     if timed then
-        local function buildPanel(white_top)
+        self.clock_panels = {}
+        for _, color in ipairs(strip_colors) do
+            -- Your own time is the one nearest you. White's card
+            -- reads upright: White's time at the bottom (near White).
+            -- Black's card goes in the flipped strip, so it's built
+            -- the other way around: after the strip's 180° rotation,
+            -- Black's time is the one nearest Black.
             local panel = ClockPanel:new{
                 white     = self.clock:remaining(WHITE),
                 black     = self.clock:remaining(BLACK),
-                -- Your own time is the one nearest you. White's card
-                -- reads upright: White's time at the bottom (near
-                -- White). Black's card goes in the flipped strip, so
-                -- it's built the other way around: after the strip's
-                -- 180° rotation, Black's time is the one nearest Black.
-                white_top = white_top,
+                white_top = (color == BLACK),
             }
             panel:update(
                 self.clock:remaining(WHITE),
                 self.clock:remaining(BLACK),
                 self.running and self.clock.turn or nil)
-            return panel
+            self.clock_panels[color] = { panel = panel }
+            card_h = math.max(card_h, panel:getSize().h)
         end
-
-        local white_panel = buildPanel(false)
-        local black_panel = buildPanel(true)
-        card_h = white_panel:getSize().h
-        self.clock_panels = {
-            white = { panel = white_panel },
-            black = { panel = black_panel },
-        }
     end
 
     -- The player strips are part of the board's unit, so their heights
     -- are inputs to the layout (like status_h): the notation block or
-    -- the clock card, whichever is taller. The bottom strip grows a
-    -- third line when Engine Hints is on -- priced once, only there,
-    -- because hints are for the reader nearest the screen.
+    -- the clock card, whichever is taller. The strips mirror each
+    -- other exactly -- two history lines plus, when the settings ask
+    -- for them, an eval row (Engine Evals) and an Engine Hints row on
+    -- BOTH strips (the far side reads them rotated) -- so one height
+    -- serves the top and bottom alike.
     local line_h = Layout.logLineHeight(scale_fn)
-    local strip_h = math.max(2 * line_h, card_h)
-    local bottom_strip_h = self:getSetting("show_hints", false)
-        and math.max(3 * line_h, card_h) or strip_h
+    local base_h = 2 * line_h
+    local extras_h = 0
+    if self:getSetting("show_eval", true) then extras_h = extras_h + line_h end
+    if self:getSetting("show_hints", false) then extras_h = extras_h + line_h end
+    local strip_h = math.max(base_h + extras_h, card_h)
+    local bottom_strip_h = strip_h
 
     local L = Layout.compute{
         screen_w = self.full_width,
@@ -913,146 +965,151 @@ function App:buildUILayout()
     local grid_x = math.floor((content_w - self.board[1]:getSize().w) / 2) + grid.left
     local strip_w = grid.w
     local strip_x = grid_x
-    local notation_w = math.floor(strip_w * 2 / 3)
 
-    -- One notation pair per strip: identical content, updated in tandem
-    -- (see updateNotation). Line 1 is the last two plies with each
-    -- move's eval; line 2 is the total advantage plus the opening name.
-    -- The bottom strip (the one nearest the reader, always upright)
-    -- grows a third Engine Hints line when the setting is on. All rows
-    -- are pinned to the layout's line height by their containers, so
-    -- the strip's height budget stays exact.
-    local function buildNotation(with_hints)
-        local moves = TextWidget:new{
-            text    = "",
-            face    = Font:getFace(self.notation_font, self.notation_size),
-            padding = 0,
+    -- Spoils gutter: the taken pieces stack down the board's right
+    -- gutter -- the symmetric mirror of the left's rank-label chrome,
+    -- which stays empty of chrome. The gutter shares the board's row
+    -- (OverlapGroup below), so its geometry is relative to the board
+    -- widget: from the measured grid's right edge to the frame's
+    -- right padding, spanning the grid's full height. Skipped when
+    -- the glass leaves no usable slack there.
+    local board_w = self.board:getSize().w
+    local gutter_gap = Screen:scaleBySize(6)
+    local gutter_x = grid.left + grid.w + gutter_gap
+    local gutter_w = board_w - self.board.board_padding / 2 - gutter_x
+    self.capture_gutter = nil
+    if gutter_w >= Screen:scaleBySize(20) then
+        self.capture_gutter = CaptureGutter:new{
+            board  = self.board,
+            x      = gutter_x,
+            y      = grid.top,
+            width  = gutter_w,
+            grid_h = grid.h,
         }
-        local total = TextWidget:new{
-            text    = "",
-            face    = Font:getFace(LOG_FONT, LOG_FONT_SIZE),
-            halign  = "left",
-            padding = 0,
-            width   = notation_w,
-        }
-        local rows = {
-            LeftContainer:new{
-                dimen = Geometry:new{ w = notation_w, h = line_h },
-                moves,
-            },
-            LeftContainer:new{
-                dimen = Geometry:new{ w = notation_w, h = line_h },
-                total,
-            },
-        }
-        local hints
-        if with_hints then
-            hints = TextWidget:new{
-                text    = "",
-                face    = Font:getFace(LOG_FONT, LOG_FONT_SIZE),
-                padding = 0,
-            }
-            rows[3] = LeftContainer:new{
-                dimen = Geometry:new{ w = notation_w, h = line_h },
-                hints,
-            }
-        end
-        local block = VerticalGroup:new{ align = "left", unpack(rows) }
-        return moves, total, hints, block
     end
 
-    local white_at_bottom = not self:shouldFlipBoard()
-    local w_moves, w_total, w_hints, w_block = buildNotation(white_at_bottom)
-    local b_moves, b_total, b_hints, b_block = buildNotation(not white_at_bottom)
-    self.notation_moves = { w_moves, b_moves }
-    self.notation_totals = { w_total, b_total }
-    -- One hints widget: whichever strip sits at the bottom. Rebuilt with
-    -- the layout (flip, settings), so the reference is always fresh.
-    self.hints_widget = w_hints or b_hints
-
-    -- Which player's strip sits at the bottom (nearest the reader)
-    -- follows the board flip: unflipped, White's side is at the bottom;
-    -- flipped, Black's. The strip at the top is the rotated one, so
+    -- One strip per color (both always built; the top one rotated, so
     -- each player still reads their own bracket right side up -- and
-    -- each clock card keeps its fixed row order (own time nearest the
-    -- reader) in either position.
-    local function buildStrip(color, block, card)
+    -- each clock card keeps its fixed row order, own time nearest the
+    -- reader, in either position). The strips MIRROR each other:
+    -- identical rows on both, eval and Engine Hints included, so the
+    -- far side reads the same verdict the near side does -- even when
+    -- that far side is a computer.
+    self.notation_history = { white = nil, black = nil }
+    self.notation_totals = { white = nil, black = nil }
+    -- The strips' Engine Hints rows, when built (one per strip --
+    -- hints text lands on every row). Rebuilt with the layout (flip,
+    -- settings), so the references are always fresh.
+    self.hints_widgets = {}
+
+    -- Compact, borderless two-ply history control in the otherwise open
+    -- center of the bottom HUD.
+    local history_scale = content_w / 1016
+    local history_button_w = GameplayDesign.round(40,history_scale)
+    local history_text_w = GameplayDesign.round(232,history_scale)
+    local history_h = math.max(30, math.floor(40 * history_scale + 0.5))
+    local history_icon_h = math.max(26, math.floor(34 * history_scale + 0.5))
+    local nav_text = TextWidget:new{
+        text="", face=Font:getFace("smallinfofont", math.max(17,
+            math.floor(21 * history_scale + 0.5))),
+        max_width=history_text_w - math.max(8,
+            math.floor(12 * history_scale + 0.5)),
+        fgcolor=Blitbuffer.COLOR_DARK_GRAY,
+    }
+    self.nav_notation = nav_text
+    local history = HorizontalGroup:new{
+        createToolbarButton("chevron.left", history_button_w, history_icon_h,
+            function() self:handleUndoMove(false) end),
+        CenterContainer:new{
+            dimen=Geometry:new{w=history_text_w,h=history_h}, nav_text,
+        },
+        createToolbarButton("chevron.right", history_button_w, history_icon_h,
+            function() self:handleRedoMove(false) end),
+    }
+
+    local function buildStrip(color)
         local at_bottom = ((color == WHITE) == white_at_bottom)
+        local captures = CapturedStrip:new{white=(color == BLACK),size=31,step=24}
+        self.captured_strips = self.captured_strips or {}
+        self.captured_strips[color] = captures
+        local card = (self.clock_panels and self.clock_panels[color])
+            and self.clock_panels[color].panel or nil
         return PlayerStrip:new{
             row_w    = content_w,
             width    = strip_w,
             offset_x = strip_x,
             rotated  = not at_bottom,
-            notation = block,
+            notation = captures,
+            center   = at_bottom and history or nil,
             clock    = card,
+            slots    = {
+                notation=GameplayDesign.rect(GameplayDesign.chess_bottom.captures,history_scale),
+                center=GameplayDesign.rect(GameplayDesign.chess_bottom.replay,history_scale),
+                clock=GameplayDesign.rect(GameplayDesign.chess_bottom.clock,history_scale),
+            },
         }
     end
-    self.white_strip = buildStrip(WHITE, w_block,
-        self.clock_panels and self.clock_panels.white.panel or nil)
-    self.black_strip = buildStrip(BLACK, b_block,
-        self.clock_panels and self.clock_panels.black.panel or nil)
-
-    -- Bottom bar, one row pinned to the BOTTOM line (BottomContainer)
-    -- exactly as the icons' ink is pinned to the top line up top: the
-    -- prev/next chevrons' ink on the left line (where New Game used to
-    -- live -- it moved into the hamburger menu), the player roster's
-    -- ink on the right line.
-    local player_face = Font:getFace(LOG_FONT, 12)
-    self.player_label = TextWidget:new{
-        text    = "",
-        face    = player_face,
-        padding = 0,
-    }
-    local nav_btn_h = Screen:scaleBySize(16) -- half the old toolbar buttons
-    local nav_btn_w = math.floor(content_w / 10)
-    local nav_row = HorizontalGroup:new{
-        createToolbarButton("chevron.left", nav_btn_w, nav_btn_h,
-            function() self:handleUndoMove(false) end),
-        createToolbarButton("chevron.right", nav_btn_w, nav_btn_h,
-            function() self:handleRedoMove(false) end),
-    }
-    local third_w = math.floor(content_w / 3)
-    local bottom_ink_h = math.max(self.player_label:getSize().h, nav_btn_h)
-    local bottom_toolbar = BottomContainer:new{
-        dimen = Geometry:new{ w = content_w, h = L.chrome.bottom_h },
-        HorizontalGroup:new{
-            LeftContainer:new{
-                dimen = Geometry:new{ w = third_w, h = bottom_ink_h },
-                nav_row,
-            },
-            RightContainer:new{
-                dimen = Geometry:new{ w = content_w - third_w, h = bottom_ink_h },
-                self.player_label,
-            },
-        },
-    }
+    self.white_strip = nil
+    self.black_strip = nil
+    for _, color in ipairs(strip_colors) do
+        if color == WHITE then
+            self.white_strip = buildStrip(WHITE)
+        else
+            self.black_strip = buildStrip(BLACK)
+        end
+    end
 
     -- The middle zone is ONE centered unit: [top strip][board][bottom
-    -- strip]. The strips are rows of the unit, so they cannot collide
+    -- strip] -- both strips in every game mode, the top one rotated
+    -- 180°. The strips are rows of the unit, so they cannot collide
     -- with the board; the leftover slack splits around it. Which strip
-    -- is on top follows the flip (see white_at_bottom above).
-    local top_strip    = white_at_bottom and self.black_strip or self.white_strip
+    -- is on top follows the flip (see white_at_bottom). The board's
+    -- row is an OverlapGroup so the spoils gutter paints beside the
+    -- squares, in the gutter the layout reserves; the gutter paints
+    -- itself at its own offsets from the row's (the board's) origin.
+    local top_strip = white_at_bottom and self.black_strip or self.white_strip
     local bottom_strip = white_at_bottom and self.white_strip or self.black_strip
-    local top_h    = top_strip:getSize().h
-    local bottom_h = bottom_strip:getSize().h
-    local gap = L.chrome.strip_gap
-    local slack = L.board.zone_h - top_h - bottom_h - 2 * gap - L.board.height
-    local unit_top = math.floor(slack / 2)
-    local middle_zone = VerticalGroup:new{
-        align = "left",
-        VerticalSpan:new{ width = unit_top },
-        top_strip,
-        VerticalSpan:new{ width = gap },
-        self.board,
-        VerticalSpan:new{ width = gap },
-        bottom_strip,
-        VerticalSpan:new{ width = slack - unit_top },
-    }
+    local one_player = self.game:isHuman(WHITE) ~= self.game:isHuman(BLACK)
+    if one_player then
+        self.computer_hud = ComputerHud:new{width=strip_w,height=L.top_hud.h,data=self:computerHudData()}
+        top_strip = self.computer_hud
+    else
+        self.computer_hud = nil
+    end
+    local board_row = self.board
+    if self.capture_gutter then
+        board_row = OverlapGroup:new{
+            dimen = Geometry:new{ w = content_w, h = self.board:getSize().h },
+            allow_mirroring = false,
+            self.board,
+            self.capture_gutter,
+        }
+    end
+    -- Fixed heads-up stack. HUD content is centered inside its 164px band;
+    -- its separator is an independent overlay so text metrics cannot move it.
+    local function hud(strip, color, top, height)
+        height = height or L.top_hud.h
+        return OverlapGroup:new{
+            dimen=Geometry:new{w=content_w,h=height},
+            allow_mirroring=false,
+            CenterContainer:new{
+                dimen=Geometry:new{w=content_w,h=height}, strip,
+            },
+            HudRule:new{active=function() return self.game:turn()==color end,width=content_w,
+                height=height,top=top},
+        }
+    end
 
-    self.status_bar = status_bar
+    local top_color = white_at_bottom and BLACK or WHITE
+    local bottom_color = white_at_bottom and WHITE or BLACK
+    self.status_bar = nil
     self[1] = VerticalGroup:new{
-        align = "center", width = content_w, height = content_h,
-        status_bar, middle_zone, bottom_toolbar,
+        align="center", width=content_w, height=content_h,
+        hud(top_strip, top_color, false),
+        VerticalSpan:new{width=L.chrome.strip_gap},
+        board_row,
+        VerticalSpan:new{width=L.bottom_hud.y - (L.board.y + L.board.height)},
+        hud(bottom_strip, bottom_color, true, L.bottom_hud.h),
     }
 
     -- The strips start empty; fill them from the current game state.
@@ -1069,12 +1126,13 @@ end
 function App:refreshMarksOverlay()
     if not self.marks then self.marks = MarksOverlay:new{} end
     self.marks.board = self.board
+    self.marks.app = self
 end
 
 --- Paints the game, then the move/selection brackets on top.
 function App:paintTo(bb, x, y)
     FrameContainer.paintTo(self, bb, x, y)
-    if self.marks then self.marks:paintTo(bb) end
+    GameplayFrame.paintOverlay(self, bb, x, y)
 end
 
 function App:initializeBoard(L)
@@ -1097,87 +1155,144 @@ function App:initializeBoard(L)
     }
 end
 
+--- The settings dialog (lives in the hamburger menu; the gear icon
+--- left the top bar). Applying translates the dialog's draft into the
+--- arbiter's flat change map; the arbiter persists + repaints everything.
+function App:openSettings()
+    if not self.arbiter then return end
+    -- The dialog only reads the clock to prefill time pickers; untimed
+    -- games have no Clock object (the arbiter owns it), so hand it a
+    -- read-only stub built from the persisted values.
+    local clock_stub = self.clock or {
+        base = {
+            w = self:getSetting("time_base_white", 900),
+            b = self:getSetting("time_base_black", 900),
+        },
+        increment = {
+            w = self:getSetting("time_incr_white", 10),
+            b = self:getSetting("time_incr_black", 10),
+        },
+    }
+    SettingsWidget:new{
+        engine = self.engine,
+        clock  = clock_stub,
+        game   = self.game,
+        parent = self,
+        onApply = function(s)
+            self:dispatch(self.arbiter:transition{ kind = "settings", changes = {
+                human_white         = s.human_choice[WHITE],
+                human_black         = s.human_choice[BLACK],
+                timed               = s.timed and true or false,
+                time_base_white     = s.time_control[WHITE].base_minutes * 60,
+                time_base_black     = s.time_control[BLACK].base_minutes * 60,
+                time_incr_white     = s.time_control[WHITE].incr_seconds,
+                time_incr_black     = s.time_control[BLACK].incr_seconds,
+                skill_level         = s.skill_level,
+                engine_depth        = s.engine_depth,
+                engine_movetime     = s.engine_movetime,
+                blunder_chance      = s.blunder_chance,
+                learning_mode       = s.learning_mode,
+                show_selected       = s.show_selected,
+                previous_move_hints = s.previous_move_hints,
+                opponent_hints      = s.opponent_hints,
+                check_hints         = s.check_hints,
+                rotate_top_pieces   = s.rotate_top_pieces,
+                flip_pieces_each_turn = s.flip_pieces_each_turn,
+                thinking_indicator  = s.thinking_indicator,
+                show_eval           = s.show_eval,
+                show_hints          = s.show_hints,
+                figurine_pgn        = s.figurine_pgn,
+            }})
+            -- Interface toggles that don't move the board (selection,
+            -- hints, learning mode) leave the board's own flags stale:
+            -- reassert them and reconcile the check hint now.
+            self:syncBoardFlags()
+            if self.board then
+                if self.board.learning_mode and self.board.check_hints then
+                    self.board:markCheckHint()
+                else
+                    self.board:clearCheckHint()
+                end
+            end
+            UIManager:setDirty(self, "ui")
+        end,
+    }:show()
+end
+
+--- Opens the in-game menu from any affordance (corner notch, swipe, or a
+--- future toolbar button). Keeping this in one method prevents the compact
+--- gameplay screen from growing multiple, subtly different menus.
+function App:openGameMenu()
+    local dialog
+    dialog = ButtonDialog:new{
+        buttons = {
+            { { text = _("Settings"), callback = function()
+                    UIManager:close(dialog)
+                    self:openSettings()
+                end } },
+            { { text = _("New Game"), callback = function()
+                    UIManager:close(dialog)
+                    self:confirmNewGame()
+                end } },
+            { { text = _("Save PGN"), callback = function()
+                    UIManager:close(dialog)
+                    UIManager:show(self:openSaveDialog())
+                end } },
+            { { text = _("Load PGN"), callback = function()
+                    UIManager:close(dialog)
+                    self:openLoadPgnDialog()
+                end } },
+            { { text = _("Flip Board"), callback = function()
+                    UIManager:close(dialog)
+                    self:toggleBoardFlip()
+                end } },
+            { { text = _("About SlateChess"), callback = function()
+                    UIManager:close(dialog)
+                    self:showAbout()
+                end } },
+            { { text = _("Exit"), callback = function()
+                    UIManager:close(dialog)
+                    self:confirmExit()
+                end } },
+        },
+    }
+    UIManager:show(dialog)
+end
+
 function App:createStatusBar()
-    local screen = require("device").screen
-    return TitleBarWidget:new{
-        fullscreen             = true,
-        width                  = self.full_width - 2 * FRAME_PAD,
-        title                  = "",
-        subtitle               = "",
-        left_icon              = "slatechess/settings",
-        left_icon_size_ratio   = 0.8, -- 20% under the title bar's base size
-        right_icon             = "slatechess/menu",
-        right_icon_size_ratio  = 0.8,
-        -- Frame contract (ui/layout.lua): the icons' ink sits ON the
-        -- frame's left/top/right lines. The plugin SVGs render
-        -- box == ink, so button_padding 0 pins the ink horizontally to
-        -- the bar's edges (= the left/right lines), and zero top
-        -- padding pins the ink to the top line. Tap zones still reach
-        -- inward (2 icon-widths), so the flush ink costs nothing
-        -- ergonomically.
-        button_padding         = 0,
-        title_h_padding        = FRAME_PAD,
-        title_top_padding      = 0,
-        bottom_v_padding       = screen:scaleBySize(8),
-        left_icon_tap_callback = function()
-            self:stopThinkingIndicator()
-            SettingsWidget:new{
-                engine = self.engine,
-                clock  = self.clock,
-                game   = self.game,
-                parent = self,
-                onApply = function()
-                    self:stopSearch()
-                    local was_timed = self.timed
-                    self.timed = self:getSetting("timed", false) and true or false
-                    self.clock:reset()
-                    if self.timed ~= was_timed then
-                        -- The clock cards appear/disappear on the
-                        -- board, so the layout (and board size) rebuilds.
-                        self:buildUILayout()
-                        self:updateBoardOrientation()
-                        self.board:updateBoard()
-                        self:updateNotation()
-                                        end
-                    self:updatePlayerDisplay()
-                    self:updateTimerDisplay()
-                    self:launchComputerMove()
-                end,
-            }:show()
-        end,
-        -- Hamburger: game actions, one per row.
-        right_icon_tap_callback = function()
-            local dialog
-            dialog = ButtonDialog:new{
-                buttons = {
-                    { { text = _("New Game"), callback = function()
-                            UIManager:close(dialog)
-                            self:confirmNewGame()
-                        end } },
-                    { { text = _("Save PGN"), callback = function()
-                            UIManager:close(dialog)
-                            UIManager:show(self:openSaveDialog())
-                        end } },
-                    { { text = _("Load PGN"), callback = function()
-                            UIManager:close(dialog)
-                            self:openLoadPgnDialog()
-                        end } },
-                    { { text = _("Flip Board"), callback = function()
-                            UIManager:close(dialog)
-                            self:toggleBoardFlip()
-                        end } },
-                    { { text = _("About SlateChess"), callback = function()
-                            UIManager:close(dialog)
-                            self:showAbout()
-                        end } },
-                    { { text = _("Exit"), callback = function()
-                            UIManager:close(dialog)
-                            self:confirmExit()
-                        end } },
-                },
-            }
-            UIManager:show(dialog)
-        end,
+    -- The one control row, ink pinned to the frame's top line: the
+    -- undo/redo chevrons centered, the hamburger's ink right-justified
+    -- on the right line. There is no bottom bar anymore -- the roster
+    -- line is gone and the board's zone runs down to the bottom line.
+    -- The plugin SVGs render box == ink, so padding-free buttons pin
+    -- exactly where their containers put them. The gear lives in the
+    -- hamburger menu (App:openSettings); the hamburger runs a third
+    -- under the old title-bar icons (those were scale(32)), the
+    -- chevrons keep the old nav-button size.
+    local content_w = self.full_width - 2 * FRAME_PAD
+    local icon_size = Screen:scaleBySize(21)
+    local nav_h     = Screen:scaleBySize(16)
+    local nav_w     = math.floor(content_w / 10)
+    local nav_gap   = Screen:scaleBySize(6)
+    local bar_h     = math.max(icon_size, nav_h)
+    return OverlapGroup:new{
+        dimen = Geometry:new{ w = content_w, h = bar_h },
+        allow_mirroring = false,
+        CenterContainer:new{
+            dimen = Geometry:new{ w = content_w, h = bar_h },
+            HorizontalGroup:new{
+                createToolbarButton("chevron.left", nav_w, nav_h,
+                    function() self:handleUndoMove(false) end),
+                HorizontalSpan:new{ width = nav_gap },
+                createToolbarButton("chevron.right", nav_w, nav_h,
+                    function() self:handleRedoMove(false) end),
+            },
+        },
+        RightContainer:new{
+            dimen = Geometry:new{ w = content_w, h = bar_h },
+            createToolbarButton("slatechess/menu", icon_size, icon_size,
+                function() self:openGameMenu() end),
+        },
     }
 end
 
@@ -1217,39 +1332,57 @@ function App:confirmExit()
         text        = _("Exit Chess?"),
         ok_text     = _("Exit"),
         ok_callback = function()
-            self:stopThinkingIndicator()
             self:stopClockTicker()
-            self.clock:stop()
+            if self.clock then self.clock:stop() end
             self:saveGameState()
             UIManager:close(self, "full")
         end,
     })
 end
 
--- Notation strips ------------------------------------------------------------------
+-- Notation strips -------------------------------------------------------------------
 --
--- Both player strips show the same two lines, so every writer below
--- feeds both copies (White's upright pair and Black's mirrored one):
--- line 1 is the last two plies with each move's eval, line 2 the total
--- advantage plus the opening name.
+-- Each player strip carries two history lines (the last four plies,
+-- two per line, the most recent pair on the second line). The taken
+-- pieces are not on the strips: they stack in the board's right
+-- gutter (ui/capture_gutter), each side's spoils on their own edge.
+-- The strips mirror each other: both may show an eval line (total
+-- advantage plus the opening name) and the Engine Hints line;
+-- buildUILayout decides which rows exist.
 
 function App:updateNotation()
-    local moves_widgets = self.notation_moves
-    local total_widgets = self.notation_totals
-    if not (moves_widgets and total_widgets) then return end
+    local all_history = self.notation_history
+    if not all_history then return end
 
     local sans = self.game:sanHistory()
     local n = #sans
     local show_eval = self:getSetting("show_eval", true)
     local figurines = self:getSetting("figurine_pgn", false)
 
-    -- The last two plies, each with its own eval from App.eval_history
-    -- (committed when the engine finishes searching that position).
-    -- White's ply carries the move number; Black's follows bare, so a
-    -- full move reads "22. Nf3 Bc4". Figurine mode swaps piece letters
-    -- for glyphs (the face falls back to FreeSerif for those glyphs).
-    local parts = {}
-    for i = math.max(1, n - 1), n do
+    if self.nav_notation then
+        local text, first = "", math.max(1, n - 1)
+        for i = first, n do
+            local move_no = math.floor((i - 1) / 2) + 1
+            local ply
+            if i % 2 == 1 then
+                ply = move_no .. ". " .. sans[i]
+            elseif i == first then
+                ply = move_no .. "... " .. sans[i]
+            else
+                ply = sans[i]
+            end
+            text = text == "" and ply or (text .. "  " .. ply)
+        end
+        self.nav_notation:setText(text)
+    end
+
+    -- One ply as text. White's plies carry the move number, Black's
+    -- follow bare, so a full move reads "22. Nf3 Bc4". Figurine mode
+    -- swaps piece letters for glyphs (the face falls back to
+    -- FreeSerif for those glyphs). Each ply also carries its own eval
+    -- from App.eval_history (committed when the engine finishes
+    -- searching that position).
+    local function ply_text(i)
         local move_no = math.floor((i - 1) / 2) + 1
         local prefix = (i % 2 == 1) and (move_no .. ". ") or ""
         local move_txt = sans[i]
@@ -1261,26 +1394,112 @@ function App:updateNotation()
             local ev = Eval.short(self.eval_history[i])
             if ev ~= "" then txt = txt .. "  " .. ev end
         end
-        parts[#parts + 1] = txt
+        return txt
     end
-    local moves_txt = table.concat(parts, " ")
 
-    -- Total advantage: the latest position eval plus the opening name.
-    -- White's perspective, bare number: the sign says who's better.
-    local eval_txt = ""
+    -- Two plies per line; the first line stays empty until four plies
+    -- have been played.
+    local lines = { "", "" }
+    for row = 1, 2 do
+        local hi = n - (2 - row) * 2
+        if hi >= 1 then
+            local parts = {}
+            for i = math.max(1, hi - 1), hi do
+                parts[#parts + 1] = ply_text(i)
+            end
+            lines[row] = table.concat(parts, " ")
+        end
+    end
+
+    -- Taken pieces, replayed from the move history (see core.eval):
+    -- stacked down the board's right gutter, each side's spoils on
+    -- their own edge of the board.
+    local caps = Eval.capturedPieces(self.game:moveHistory())
+    if self.captured_strips then
+        if self.captured_strips[WHITE] then
+            self.captured_strips[WHITE]:setPieces(caps.b)
+        end
+        if self.captured_strips[BLACK] then
+            self.captured_strips[BLACK]:setPieces(caps.w)
+        end
+    end
+
+    -- Eval line (mirrored on both strips): the latest position
+    -- eval plus the opening name. White's perspective, bare number:
+    -- the sign says who's better.
+    local total_txt = ""
     if show_eval then
-        eval_txt = Eval.short{ cp = self.last_cp, mate = self.last_mate }
+        local eval_txt = Eval.short{ cp = self.last_cp, mate = self.last_mate }
+        total_txt = eval_txt
+        local opening = self:detectOpening()
+        if opening then
+            local head = string.format("%s (%s)", opening.name, opening.eco or "?")
+            total_txt = (eval_txt ~= "") and (head .. " · " .. eval_txt) or head
+        end
     end
-    local total_txt = eval_txt
-    local opening = self:detectOpening()
-    if opening then
-        local head = string.format("%s (%s)", opening.name, opening.eco or "?")
-        total_txt = (eval_txt ~= "") and (head .. " · " .. eval_txt) or head
+    -- The arbiter's thinking latch replaces the eval line while the
+    -- computer works, exactly like the old thinking indicator.
+    if show_eval and self.running and self.arbiter and self.arbiter.thinking then
+        total_txt = _("Computer thinking...")
     end
 
-    for _, w in ipairs(moves_widgets) do w:setText(moves_txt) end
-    for _, w in ipairs(total_widgets) do w:setText(total_txt) end
+    for _, color in ipairs({ WHITE, BLACK }) do
+        local history = all_history[color]
+        if history then
+            history[1]:setText(lines[1])
+            history[2]:setText(lines[2])
+        end
+        local total = self.notation_totals[color]
+        if total then total:setText(total_txt) end
+    end
+    if self.capture_gutter then
+        self.capture_gutter:update(caps.w, caps.b)
+    end
+    if self.computer_hud then self.computer_hud:setData(self:computerHudData()) end
     UIManager:setDirty(self, "ui")
+end
+
+local ELO_PRESETS = {
+    {0,1,1,.50,600}, {0,1,1,.35,750}, {0,1,1,.25,900}, {0,2,1,.20,1050},
+    {0,2,1,.10,1200}, {0,3,1,.10,1350}, {3,3,1,.05,1500}, {5,4,1,.05,1650},
+    {7,4,1,0,1800}, {9,5,1,0,1950}, {10,0,1,0,2100}, {20,0,10,0,2400},
+}
+
+function App:computerElo()
+    local best,distance=1050,math.huge
+    for _,p in ipairs(ELO_PRESETS) do
+        local d=math.abs((self.current_skill or 0)-p[1])*2+math.abs((self.engine_depth or 2)-p[2])*2
+            +math.abs((self.engine_movetime or 1)-p[3])+math.abs((self.blunder_chance or .2)-p[4])*20
+        if d<distance then best,distance=p[5],d end
+    end
+    return best
+end
+
+function App:computerHudData()
+    local sans,recent=self.game:sanHistory(),{}
+    local human=self.game:isHuman(WHITE) and WHITE or BLACK
+    local sign=human==WHITE and 1 or -1
+    for i=math.max(1,#sans-2),#sans do
+        local move_no=math.floor((i-1)/2)+1
+        local prefix=i%2==1 and (move_no..". ") or (move_no.."... ")
+        local ev=self.eval_history and self.eval_history[i] or nil
+        local adjusted=ev and {cp=ev.cp and ev.cp*sign or nil,mate=ev.mate and ev.mate*sign or nil} or nil
+        recent[#recent+1]={move=prefix..sans[i],eval=Eval.short(adjusted)}
+    end
+    local suggested={}
+    if self.arbiter and self.arbiter._hint_pvs then
+        for i=1,2 do local pv=self.arbiter._hint_pvs[i]
+            if pv and pv.move then suggested[#suggested+1]={move=self.arbiter:_uciToSan(pv.move),
+                eval=Eval.short{cp=pv.cp and pv.cp*sign or nil,mate=pv.mate and pv.mate*sign or nil}} end
+        end
+    end
+    local caps=Eval.capturedPieces(self.game:moveHistory())
+    return {elo=self:computerElo(),human_color=human,captures=human==WHITE and caps.w or caps.b,
+        recent=recent,suggested=suggested,
+        show_elo=self:getSetting("show_engine_elo",true),
+        show_captures=self:getSetting("show_computer_captures",true),
+        show_recent=self:getSetting("show_eval",true),
+        show_suggestions=self:getSetting("show_hints",false) and self.game:turn()==human}
 end
 
 function App:detectOpening()
@@ -1288,9 +1507,8 @@ function App:detectOpening()
     return Openings.match(self.openings, self.game:sanHistory())
 end
 
---- Status bar: clocks when timed, player types always.
+--- Clock cards: push the current remaining times (when timed).
 function App:updateTimerDisplay()
-    local ind = self.running and ((self.game:turn() == WHITE and " < ") or " > ") or " || "
     if self.timed and self.clock_panels then
         local w, b = self.clock:remaining(WHITE), self.clock:remaining(BLACK)
         local active = self.running and self.clock.turn or nil
@@ -1299,374 +1517,56 @@ function App:updateTimerDisplay()
             UIManager:setDirty(entry.panel, "ui")
         end
     end
-    self.status_bar:setTitle("")
-    self:updatePlayerDisplay(ind)
-    UIManager:setDirty(self.status_bar, "ui")
 end
 
---- The player roster lives at the bottom right: who plays White / Black,
---- with the turn marker between them (< white to move, > black, || paused).
-function App:updatePlayerDisplay(ind)
-    local white = "White(" .. (self.game:isHuman(WHITE) and "Human" or "Computer") .. ")"
-    local black = "Black(" .. (self.game:isHuman(BLACK) and "Human" or "Computer") .. ")"
-    local sep = ind or (self.running and ((self.game:turn() == WHITE and " < ") or " > ") or " || ")
-    local text = white .. sep .. black
-    if self.player_label then
-        if self.player_label.text ~= text then
-            self.player_label:setText(text)
-            UIManager:setDirty(self, "ui")
-        end
-    end
-end
-
--- Thinking indicator ---------------------------------------------------------------
-
-function App:startThinkingIndicator()
-    self:stopThinkingIndicator()
-    if self:getSetting("thinking_indicator", true) == false then return end
-    if not self.status_bar then return end
-    local token = {}
-    self._thinking_token = token
-    UIManager:scheduleIn(3, function()
-        if self._thinking_token == token then self:showThinkingIndicator() end
-    end)
-end
-
-function App:showThinkingIndicator()
-    if self._thinking_visible or not self.status_bar then return end
-    self._thinking_visible = true
-    -- NOTE: the loop variable must not be "_" -- it would shadow the
-    -- gettext function inside the loop body (crash: "attempt to call
-    -- local '_' (a number value)").
-    local text = _("Computer thinking...")
-    self.status_bar:setSubTitle(text)
-    local totals = self.notation_totals or {}
-    for i = 1, #totals do totals[i]:setText(text) end
-    UIManager:setDirty(self.status_bar, "ui")
-    UIManager:setDirty(self, "ui")
-end
-
-function App:stopThinkingIndicator()
-    local was_visible = self._thinking_visible
-    self._thinking_token = nil
-    self._thinking_visible = false
-    if was_visible and self.status_bar and self.game then
-        -- The subtitle is the thinking indicator's only home now (the
-        -- player roster moved to the bottom bar), so clear it on stop.
-        self.status_bar:setSubTitle("")
-        self:updatePlayerDisplay()
-        self:updateNotation()
-    end
-end
-
--- Clock ticker -----------------------------------------------------------------------
-
---- A 1-second UI tick while a clock runs: refreshes the display and
---- detects flag-fall. Cancelled by bumping the token.
-function App:ensureClockTicker()
-    local token = {}
-    self._clock_token = token
-    local function tick()
-        if self._clock_token ~= token then return end
-        if not self.clock or not self.clock.running then return end
-        self:updateTimerDisplay()
-        if self.clock:expired() then
-            self:onClockFlag()
-            return
-        end
-        UIManager:scheduleIn(1, tick)
-    end
-    UIManager:scheduleIn(1, tick)
-end
-
-function App:stopClockTicker()
-    self._clock_token = nil
-end
-
---- Flag-fall: the side on move ran out of time.
-function App:onClockFlag()
-    self.clock:stop()
-    self:stopClockTicker()
-    self:stopSearch()
-    self.running = false
-    local winner = (self.clock.turn == WHITE) and _("Black") or _("White")
-    self:finishGame(string.format(_("%s wins on time."), winner))
+--- The arbiter owns the clock ticker and flag detection; this stub keeps
+--- the old call sites (close/exit) meaningful without duplicating them.
+function App:stopClockTicker() -- luacheck: ignore self
 end
 
 -- Move flow ------------------------------------------------------------------------
 
---- Called by the board after any move (human input or promotion).
-function App:onMoveExecuted(_)
-    self:stopThinkingIndicator()
-    self.running = true
-
-    self:updateNotation()
-    -- Human vs human: re-derive orientation for the side to move
-    -- (board squares stay put; only the piece icons flip).
-    self:updateBoardOrientation()
-
-    local status = self.game:status()
-    if status.over then
-        self:showGameOverDialog(status)
-        UIManager:setDirty(self, "ui")
-        return
-    end
-
-    self:launchNextMove()
-    -- When the computer is on move, its search refreshes the eval; when
-    -- a human is on move (or the engine is not searching), run the
-    -- short background analysis instead.
-    self:launchAnalysis()
-    UIManager:setDirty(self, "ui")
-end
-
---- Continues the game after a move: clocks, then the engine if it is on move.
-function App:launchNextMove()
-    if self.timed then
-        self.clock:switch(self.game:turn())
-        self:ensureClockTicker()
-    end
-    self:updateTimerDisplay()
-    if self.engine and self.engine.state.uciok and not self.game:isHuman(self.game:turn()) then
-        self:launchSearch()
-    end
-end
-
---- Starts the engine for the side on move right now (game start, resume,
---- settings change).
-function App:launchComputerMove()
-    if not (self.engine and self.engine.state.uciok and not self.game:isHuman(self.game:turn())) then return end
-
-    self.running = true
-    if self.timed then
-        self.clock:switch(self.game:turn())
-        self:ensureClockTicker()
-    end
-    self:updateTimerDisplay()
-    self:launchSearch()
-end
-
---- Sends the search request to the engine.
-function App:launchSearch()
-    if not (self.engine and self.engine.state and self.engine.state.uciok) then return end
-    if self.engine_busy then return end
-    if self._analysis_active then
-        -- Let the short analysis finish (its bestmove commits the eval),
-        -- then retry -- never send a second `go` while one is running.
-        if not self._search_retry then
-            self._search_retry = true
-            UIManager:scheduleIn(0.3, function()
-                self._search_retry = false
-                if self.engine then self:launchSearch() end
-            end)
-        end
-        return
-    end
-    self.engine_busy = true
-    self._search_ply = #(self.game:sanHistory())
-    self:startThinkingIndicator()
-    self._search_started_at = UIManager:getTime()
-    self._go_kind = "search"
-
-    self:syncEnginePosition()
-    self.eval_turn = self.game:turn()
-    -- Move searches run under the player's handicap (and single-PV);
-    -- full-strength MultiPV 2 is reserved for the background analysis.
-    self.engine.send("setoption name Skill Level value " .. tostring(self.current_skill or 0))
-    self.engine.send("setoption name MultiPV value 1")
-
-    local movetime_ms = (self.engine_movetime or 1) * 1000
-    local d = tonumber(self.engine_depth) or 0
-    local depth_limit = (d >= 1 and d <= 5) and d or nil
-
-    if self.timed then
-        self.engine:go{
-            wtime    = math.max(100, self.clock:remaining(WHITE) * 1000),
-            btime    = math.max(100, self.clock:remaining(BLACK) * 1000),
-            winc     = self.clock.increment[WHITE] * 1000,
-            binc     = self.clock.increment[BLACK] * 1000,
-            movetime = movetime_ms,
-            depth    = depth_limit,
-        }
-    else
-        -- Untimed: no clock pressure, just the configured move time / depth.
-        self.engine:go{
-            movetime = movetime_ms,
-            depth    = depth_limit,
-        }
-    end
-    logger.dbg("slatechess: engine > go (move search) movetime", movetime_ms,
-        "depth", depth_limit or "none", "fen", self.game:fen())
-
-    -- Watchdog: a healthy search answers well inside its budget. If it
-    -- doesn't, send `stop` so the engine emits its best line so far and
-    -- the game continues; if even that fails, declare the engine stalled
-    -- instead of leaving the app stuck on the thinking indicator.
-    local watchdog_token = {}
-    self._search_watchdog = watchdog_token
-    local budget_s = self.timed and 30 or (movetime_ms / 1000) + 6
-    UIManager:scheduleIn(budget_s, function()
-        if self._search_watchdog ~= watchdog_token or not self.engine_busy then return end
-        logger.warn("slatechess: move search stalled at", self.game:fen(), "-- sending stop")
-        if self.engine and not self.engine.closed then self.engine:stop() end
-        UIManager:scheduleIn(5, function()
-            if self._search_watchdog ~= watchdog_token or not self.engine_busy then return end
-            logger.warn("slatechess: engine unresponsive; giving up")
-            self:stopSearch()
-            self:stopThinkingIndicator()
-            self:markEngineInvalid("Engine stalled during its move search.\n"
-                .. "Position: " .. self.game:fen() .. "\n"
-                .. "Use 'SlateChess: engine diagnostics' to restart it.")
-        end)
-    end)
-end
-
---- Applies the engine's move (possibly degraded by the Blunder damper).
-function App:applyEngineMove(uci_move)
-    if not uci_move then return end
-    if self.blunderer then
-        uci_move = self.blunderer:maybeWeaken(uci_move)
-    end
-    local move = self.game:playUci(uci_move)
-    if move then
-        self.board:handleGameMove(move)
-    end
-end
-
-function App:handleUndoMove(all)
-    self:stopSearch()
-    if self.timed then self.clock:stop() end
-    if all then
-        while self.game:undo() do end
-    else
-        self.game:undo()
-    end
-    self:updateBoardOrientation()
-    self.board:updateBoard()
-    self:resetEval()
-    self:updateNotation()
-    -- Hints described the position that no longer exists.
-    if self.hints_widget then self.hints_widget:setText("") end
-    UIManager:setDirty(self, "ui")
-    if self.timed and self.running then
-        self.clock:switch(self.game:turn())
-        self:ensureClockTicker()
-    end
-end
-
-function App:handleRedoMove(all)
-    self:stopSearch()
-    if self.timed then self.clock:stop() end
-    if all then
-        while self.game:redo() do end
-    else
-        self.game:redo()
-    end
-    self:updateBoardOrientation()
-    self.board:updateBoard()
-    self:resetEval()
-    self:updateNotation()
-    if self.hints_widget then self.hints_widget:setText("") end
-    UIManager:setDirty(self, "ui")
-    if self.timed and self.running then
-        self.clock:switch(self.game:turn())
-        self:ensureClockTicker()
-    end
-end
-
-function App:resetGame()
-    self:stopSearch()
-    self:stopClockTicker()
-    self.game:reset()
-    self.clock:reset()
-    if self.engine then self.engine.send("ucinewgame") end
-    self.board:clearValidMoves()
-    self.board:clearPreviousMoveHints()
-    self.board:clearCheckHint()
-    self:setSetting("saved_pgn", "")
-    self.running = false
-    self:resetEval()
-    -- Fresh game: both strips must go blank immediately (no moves made
-    -- yet), not keep the previous game's notation until the first move.
-    self:updateNotation()
-    if self.hints_widget then self.hints_widget:setText("") end
-    self:updateBoardOrientation()
-    self:updateTimerDisplay()
-    self:updatePlayerDisplay()
-    self.board:updateBoard()
-    UIManager:setDirty(self, "ui")
-    self:launchComputerMove()
-end
-
--- Game over ------------------------------------------------------------------------
-
---- Shared game-over flow: stop everything, announce, then start fresh.
-function App:finishGame(text)
-    self:stopSearch()
-    self:stopClockTicker()
-    self.clock:stop()
-    self.running = false
-    self:updateTimerDisplay()
-
-    UIManager:show(ConfirmBox:new{
-        text = text,
-        ok_text = _("Continue"),
-        cancel_text = nil,
-        ok_callback = function()
-            self:resetEval()
-            self.running = false
-            self:resetGame()
-            self:updateNotation()
-                    self:launchComputerMove()
-        end,
+--- Called by the board with the desired move `{from, to, promotion}`.
+--- The arbiter validates and plays it, and its repaint effects redraw.
+function App:onMoveExecuted(move)
+    if not (self.arbiter and move) then return end
+    self:dispatch(self.arbiter:transition{
+        kind = "human_move",
+        from = move.from,
+        to   = move.to,
+        promotion = move.promotion,
     })
 end
 
-function App:showGameOverDialog(status)
-    self:stopThinkingIndicator()
-    local text
-    if status.result == "1-0" or status.result == "0-1" then
-        local winner = (status.result == "1-0") and _("White") or _("Black")
-        text = string.format(_("Checkmate! %s wins."), winner)
-    else
-        local label = status.reason and _(status.reason) or nil
-        text = label and string.format(_("Draw! %s."), label) or _("Draw!")
+function App:handleUndoMove(all)
+    if not self.arbiter then return end
+    self:dispatch(self.arbiter:transition{ kind = "undo", all = all })
+end
+
+function App:handleRedoMove(all)
+    if not self.arbiter then return end
+    self:dispatch(self.arbiter:transition{ kind = "redo", all = all })
+end
+
+--- New game / reset. The reset transition already auto-launches when a
+--- computer opens and the engine is ready; analysis resumes on the first
+--- human move.
+function App:resetGame()
+    if not self.arbiter then return end
+    if self.board then
+        self.board:clearValidMoves()
+        self.board:clearPreviousMoveHints()
+        self.board:clearCheckHint()
     end
-    self:finishGame(text)
+    self:dispatch(self.arbiter:transition{ kind = "reset" })
 end
 
 -- Persistence -----------------------------------------------------------------------
 
 function App:saveGameState()
-    self:setSetting("saved_pgn", self.game:pgn())
-    self:setSetting("saved_time_white", self.clock:remaining(WHITE))
-    self:setSetting("saved_time_black", self.clock:remaining(BLACK))
-    self:setSetting("saved_running", self.running)
-end
-
-function App:restoreGameState()
-    local pgn = self:getSetting("saved_pgn", "")
-    if not pgn or pgn == "" then return end
-
-    local ok = self.game:loadPgn(pgn)
-    if not ok then
-        self:setSetting("saved_pgn", "")
-        return
+    if self.arbiter then
+        self:dispatch(self.arbiter:transition{ kind = "save_requested" })
     end
-
-    if self.timed then
-        local tw = self:getSetting("saved_time_white", nil)
-        local tb = self:getSetting("saved_time_black", nil)
-        if tw then self.clock:setTime(WHITE, tw) end
-        if tb then self.clock:setTime(BLACK, tb) end
-    end
-    self.clock:setTurn(self.game:turn())
-    self.running = self:getSetting("saved_running", false)
-
-    self:syncEnginePosition()
-    self:updateNotation()
-    self:updateTimerDisplay()
-    self:updatePlayerDisplay()
 end
 
 -- PGN load / save dialogs -------------------------------------------------------------
@@ -1687,30 +1587,12 @@ function App:openLoadPgnDialog()
                 local pgn_data = fh:read("*a")
                 fh:close()
 
-                self:stopSearch()
-                self:stopClockTicker()
-                self.clock:stop()
-                self.game:reset()
-                self.game:loadPgn(pgn_data)
-                self:resetEval()
-
-                self:updateBoardOrientation()
-                self.board:updateBoard()
-                self:updateNotation()
-                self:updateTimerDisplay()
-                self:updatePlayerDisplay()
-
-                if self.engine and self.engine.state.uciok then
-                    self.engine.send("ucinewgame")
-                    self:syncEnginePosition()
-                    self.engine.send("isready")
+                -- The arbiter parses the PGN, restores the previous game on
+                -- failure, and its repaint effects redraw everything.
+                if self.arbiter then
+                    self:dispatch(self.arbiter:transition{ kind = "pgn_loaded", pgn = pgn_data })
                 end
-
                 UIManager:setDirty(self, "ui")
-                if self.timed then
-                    self.clock:switch(self.game:turn())
-                    self:ensureClockTicker()
-                end
                         end,
         }
     )
@@ -1861,8 +1743,9 @@ function App:openPromotionDialog(from, to, color)
             width = icon_size, icon_width = icon_size, icon_height = icon_size,
             callback = function()
                 UIManager:close(dialog)
-                local move = self.game:playMove{ from = from, to = to, promotion = char }
-                if move then self.board:handleGameMove(move) end
+                -- The arbiter plays and repaints; here we just report the
+                -- desired promotion like any other board move.
+                self:onMoveExecuted{ from = from, to = to, promotion = char }
             end,
         })
     end

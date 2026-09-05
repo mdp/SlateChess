@@ -1,140 +1,77 @@
--- Tests for ui.layout — the screen's single geometry source.
---
--- These pin the layout invariants the UI is built on: the uniform
--- FRAME_PAD frame, the margin lines every element's ink aligns to, a
--- deterministic board cell (no measuring of built widgets), and
--- minimal symmetric notation gutters with the board dead center.
-
 local Layout = require("ui.layout")
 
--- Identity scale: nominal points == pixels, so expectations stay readable.
-local function identity(n) return n end
+describe("heads-up gameplay layout", function()
+    local L = Layout.compute{screen_w=1080, screen_h=1440,
+        scale=function(n) return n end, metrics=Layout.boardMetrics()}
 
-local function metrics(scale)
-    return Layout.boardMetrics(scale or identity)
-end
-
-local function compute(over)
-    local o = {
-        screen_w = 758,
-        screen_h = 1024,
-        status_h = 76,
-        scale = identity,
-        metrics = metrics(),
-    }
-    for k, v in pairs(over or {}) do o[k] = v end
-    return Layout.compute(o)
-end
-
-describe("Layout", function()
-    it("insets the content box by FRAME_PAD on all four sides", function()
-        local L = compute{}
-        assert.equals(16, L.pad)
-        assert.equals(758 - 32, L.content.w)
-        assert.equals(1024 - 32, L.content.h)
-        -- The four frame lines sit exactly one pad in from the glass.
-        assert.equals(16, L.lines.left)
-        assert.equals(758 - 16, L.lines.right)
-        assert.equals(16, L.lines.top)
-        assert.equals(1024 - 16, L.lines.bottom)
+    it("matches the 1080x1440 design master exactly", function()
+        assert.same({x=32,y=12,w=1016,h=164,rotation=180}, L.top_hud)
+        assert.equals(32, L.board.x)
+        assert.equals(184, L.board.y)
+        assert.equals(1016, L.board.w)
+        assert.equals(1016, L.board.height)
+        assert.equals(127, L.board.cell)
+        assert.same({x=32,y=1200,w=1016,h=40}, L.file_rail)
+        assert.same({x=1048,y=184,w=32,h=1016}, L.rank_rail)
+        assert.same({x=32,y=1263,w=1016,h=175,rotation=0}, L.bottom_hud)
+        assert.equals(23, L.bottom_hud.y - (L.file_rail.y + L.file_rail.h))
     end)
 
-    it("exposes the frame pad as the one knob, scaled by the scale fn", function()
-        -- Nothing else in the app may hardcode a screen-edge padding:
-        -- components render box == ink and align to these lines.
-        assert.equals(16, Layout.FRAME_PAD_PTS)
-        local L = compute{ scale = function(n) return n * 2 end,
-            metrics = metrics(function(n) return n * 2 end) }
-        assert.equals(32, L.pad)
-        assert.equals(758 - 64, L.content.w)
+    it("reserves no coordinate space inside the square grid", function()
+        local M = Layout.boardMetrics()
+        assert.equals(0, M.side_zone_w)
+        assert.equals(0, M.file_zone_h)
+        assert.equals(25, M.coord_label)
     end)
 
-    it("gives the board a cell whose squares fit inside the content width", function()
-        local L = compute{}
-        local m = metrics()
-        assert.is_true(L.board.squares_w <= L.content.w - m.board_padding - 2 * m.side_zone_w)
-        assert.equals(L.board.cell * 8, L.board.squares_w)
+    it("retains integral square geometry on other screens", function()
+        local small = Layout.compute{screen_w=758, screen_h=1024}
+        assert.equals(small.board.cell * 8, small.board.w)
+        assert.equals(small.board.w, small.board.height)
+        assert.is_true(small.board.x >= 0)
+        assert.is_true(small.bottom_hud.y + small.bottom_hud.h <= 1024)
     end)
 
-    it("gives the board a cell whose squares fit the zone height", function()
-        local L = compute{}
-        local m = metrics()
-        local built = L.board.squares_w + 2 * m.board_padding + m.file_zone_h
-        assert.equals(L.board.height, built)
-        assert.is_true(built <= L.board.zone_h)
+    it("keeps the complete gameplay frame on-screen across target devices", function()
+        for _, size in ipairs({{600,800},{758,1024},{1072,1448},{1236,1648},
+                {1264,1680},{1404,1872},{1440,1920},{1860,2480},{1980,2640},
+                {1024,1416},{2160,2468}}) do
+            local w,h=size[1],size[2]
+            local g=Layout.compute{screen_w=w,screen_h=h}
+            assert.equals(g.board.cell*8,g.board.w)
+            assert.equals(g.board.w,g.board.height)
+            assert.is_true(g.top_hud.y+g.top_hud.h<=g.board.y)
+            assert.equals(g.board.y+g.board.height,g.file_rail.y)
+            assert.is_true(g.file_rail.y+g.file_rail.h<=g.bottom_hud.y)
+            assert.is_true(g.bottom_hud.y+g.bottom_hud.h<=h)
+            assert.is_true(g.board.x>=0 and g.board.x+g.board.w<=w)
+            local k=math.min(w/Layout.DESIGN_W,h/Layout.DESIGN_H)
+            assert.is_true(math.max(18,math.floor(30*k+.5))+
+                math.max(34,math.floor(48*k+.5))<=math.min(w,h))
+        end
     end)
 
-    it("reserves exactly the notation width as symmetric gutters", function()
-        -- The gutter is minimal: per side just [outer][rank col][gap];
-        -- the right side mirrors the left so the squares stay centered.
-        local L = compute{}
-        local m = metrics()
-        assert.equals(L.content.w, L.board.squares_w + 2 * L.board.gutter_w)
-        assert.is_true(L.board.gutter_w >= m.side_zone_w + m.board_padding / 2)
+    it("lays out the lower puzzle action row at exact master coordinates", function()
+        local a=Layout.puzzleActions(1016,196)
+        assert.same({"previous","next","hint"},a.order)
+        assert.same({x=324,y=116,w=220,h=58},a.previous)
+        assert.same({x=556,y=116,w=220,h=58},a.next)
+        assert.same({x=788,y=116,w=220,h=58},a.hint)
+        assert.same({x=0,y=116,w=72,h=58},a.menu)
     end)
 
-    it("computes the gutter from the content width and squares, deterministically", function()
-        local L = compute{}
-        local expected = math.floor((L.content.w - L.board.squares_w) / 2)
-        assert.equals(expected, L.board.gutter_w)
-        local L2 = compute{}
-        -- Same inputs, same gutter: no measuring of built widgets.
-        assert.equals(L.board.cell, L2.board.cell)
-        assert.equals(expected, L2.board.gutter_w)
+    it("places the puzzle footer on the corrected master boundary", function()
+        local p = Layout.compute{screen_w=1080,screen_h=1440,puzzle_footer=true}
+        assert.same({x=32,y=1244,w=1016,h=196,rotation=0},p.bottom_hud)
+        assert.equals(4,p.bottom_hud.y-(p.file_rail.y+p.file_rail.h))
+        local a=Layout.puzzleActions(p.bottom_hud.w,p.bottom_hud.h)
+        assert.equals(116,a.y)
     end)
 
-    it("keeps the bottom bar tall enough for one row of toolbar ink", function()
-        local L = compute{}
-        assert.is_true(L.chrome.bottom_h >= 32)
-    end)
-
-    it("stacks the middle zone as one strip-board-strip unit", function()
-        -- The zone runs from the top bar right down to the bottom bar;
-        -- the unit [strip][board][strip] plus its gaps fits inside.
-        local L = compute{ strip_h = 40 }
-        local unit = 2 * 40 + 2 * L.chrome.strip_gap + L.board.height
-        assert.is_true(unit <= L.board.zone_h)
-        assert.equals(L.content.h - 76 - L.chrome.bottom_h, L.board.zone_h)
-        assert.equals(40, L.board.strip_h)
-        -- The bottom strip mirrors the top unless told otherwise.
-        assert.equals(40, L.board.bottom_strip_h)
-    end)
-
-    it("prices a taller bottom strip once, not twice", function()
-        -- The Engine Hints line makes only the bottom strip taller; the
-        -- board should shrink by that extra height alone.
-        local even = compute{ screen_h = 800, strip_h = 40 }
-        local hints = compute{ screen_h = 800, strip_h = 40, bottom_strip_h = 60 }
-        assert.equals(40, hints.board.strip_h)
-        assert.equals(60, hints.board.bottom_strip_h)
-        assert.equals(even.board.zone_h, hints.board.zone_h)
-        -- The extra 20px come out of the board's budget, and only once:
-        -- the cell gives back between 2 and 3 px per side.
-        assert.is_true(hints.board.cell <= even.board.cell - 2)
-        assert.is_true(hints.board.cell >= even.board.cell - 3)
-    end)
-
-    it("shrinks the board for taller strips, not for one-sided cards", function()
-        -- Both strips are part of the unit now, so a taller strip costs
-        -- the board twice what it used to when only Black's card counted.
-        -- (On a width-bound screen the cell cannot shrink at all; use a
-        -- short screen where the height is the binding constraint.)
-        local untimed = compute{ screen_h = 800 }
-        local timed = compute{ screen_h = 800, strip_h = 40 }
-        assert.is_true(timed.board.cell < untimed.board.cell)
-        assert.is_true(timed.board.squares_w + 4 < untimed.board.squares_w)
-        -- A strip never grows the board, whatever binds.
-        local wide = compute{ strip_h = 40 }
-        assert.is_true(wide.board.cell <= compute{}.board.cell)
-        -- The strips are always part of the unit: strip_h defaults to 0
-        -- only in specs; the app always measures one.
-        assert.equals(0, untimed.board.strip_h)
-    end)
-
-    it("board metrics match the board's nominal chrome", function()
-        local m = metrics()
-        assert.equals(8, m.board_padding)
-        assert.equals(23, m.side_zone_w)  -- outer(1) + label(16) + gap(6)
-        assert.equals(27, m.file_zone_h)  -- row(21) + gap(6)
+    it("fits the entire composition when height, not width, is limiting", function()
+        local wide = Layout.compute{screen_w=2160, screen_h=2468}
+        assert.is_true(wide.board.x > 32)
+        assert.is_true(wide.bottom_hud.y + wide.bottom_hud.h <= 2468)
+        assert.equals(wide.board.cell * 8, wide.board.w)
     end)
 end)

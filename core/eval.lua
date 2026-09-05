@@ -27,11 +27,13 @@ end
 -- when the line carries no score or no pv token.
 function Eval.parsePv(line)
     if type(line) ~= "string" or not line:match("^info ") then return nil end
-    local multipv = tonumber(line:match(" multipv (%d+)"))
+    -- Some engines emit a perfectly usable single PV
+    -- without spelling out `multipv 1`; treat that standard form as slot 1.
+    local multipv = tonumber(line:match(" multipv (%d+)")) or 1
     local cp   = tonumber(line:match(" score cp (-?%d+)"))
     local mate = tonumber(line:match(" score mate (-?%d+)"))
     local move = line:match(" pv (%S+)")
-    if not (multipv and (cp or mate) and move) then return nil end
+    if not ((cp or mate) and move) then return nil end
     return { multipv = multipv, cp = cp, mate = mate, move = move }
 end
 
@@ -61,6 +63,81 @@ function Eval.toWhitePerspective(score, turn)
     if score == nil then return nil end
     if turn == "b" then return -tonumber(score) end
     return tonumber(score)
+end
+
+-- Captured pieces ---------------------------------------------------------------------
+--
+-- The player strips show each side's taken pieces as a glyph row
+-- (♟♟♞ … ♙♙♙♝). Capture counts are replayed from the game's verbose
+-- move history rather than derived from the position: counting
+-- "starting minus remaining" cannot tell a captured pawn from one
+-- that promoted (and came back to be captured as a queen), while the
+-- history's `captured` field knows exactly what left the board, en
+-- passant included.
+
+-- Display order, low value first.
+local CAPTURE_ORDER = { "p", "n", "b", "r", "q" }
+
+-- Glyph sets, same fonts as the figurine notation: the sans fonts
+-- ship none of these, so TextWidget's fallback chain picks them up
+-- from FreeSerif.
+local CAPTURE_GLYPHS = {
+    w = { p = "♙", n = "♘", b = "♗", r = "♖", q = "♕" },
+    b = { p = "♟", n = "♞", b = "♝", r = "♜", q = "♛" },
+}
+
+--- Counts captured pieces from a rules-engine verbose move history
+-- (pretty move tables; `m.captured` is the type that left the board,
+-- `m.color` the mover's). Returns per color the pieces of THAT color
+-- which were captured:
+--   { w = { p = 1, ... }, b = { p = 3, n = 1 } }
+-- (White's entries are the pieces Black took, and vice versa.)
+-- Absent types were not captured.
+function Eval.captured(history)
+    local out = { w = {}, b = {} }
+    for _, m in ipairs(history or {}) do
+        if m.captured then
+            -- The mover takes a piece of the opposite color.
+            local victim = (m.color == "w") and out.b or out.w
+            victim[m.captured] = (victim[m.captured] or 0) + 1
+        end
+    end
+    return out
+end
+
+--- Renders the captured pieces as two glyph strings ("♟♟♞"), one per
+-- color, pawns first. Passed straight to the strip's captured row.
+function Eval.capturedGlyphs(history)
+    local caps = Eval.captured(history)
+    local function glyphs(color)
+        local map = CAPTURE_GLYPHS[color]
+        local out = {}
+        for _, t in ipairs(CAPTURE_ORDER) do
+            local n = caps[color][t]
+            if n then out[#out + 1] = string.rep(map[t], n) end
+        end
+        return table.concat(out)
+    end
+    return { w = glyphs("w"), b = glyphs("b") }
+end
+
+--- Captured pieces as two arrays of uppercase piece letters ("P",
+-- "N", ...), one per side's LOSSES: `w` lists the white pieces that
+-- were taken, `b` the black ones -- same convention as capturedGlyphs.
+-- Pawns come first. Feeds the board-gutter spoils columns, which draw
+-- one icon per piece rather than one glyph string per side.
+function Eval.capturedPieces(history)
+    local caps = Eval.captured(history)
+    local function list(color)
+        local out = {}
+        for _, t in ipairs(CAPTURE_ORDER) do
+            for _ = 1, caps[color][t] or 0 do
+                out[#out + 1] = string.upper(t)
+            end
+        end
+        return out
+    end
+    return { w = list("w"), b = list("b") }
 end
 
 local function advantage_tag(value)

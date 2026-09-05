@@ -1,181 +1,90 @@
--- Layout: single source of truth for the main screen's geometry.
---
--- THE FRAME CONTRACT
--- ------------------
--- FRAME_PAD_PTS below is the ONE padding knob in the app. The content
--- box is the glass inset by that much on all four sides, and every
--- element's visible ink lives inside it, touching the frame line it
--- aligns to: gear / move notation / prev-next chevrons on the left line,
--- hamburger / player roster on the right, icon ink on the top line,
--- chevron and roster ink on the bottom line.
---
--- That holds without per-element nudges because components render
--- box == ink -- no hidden padding of their own:
---   * SVG icons ship with viewBoxes cropped to their exact ink bounds
---     (icons/settings.svg, icons/menu.svg),
---   * buttons are frameless (bordersize 0, no horizontal padding; the
---     tap zone grows upward/around, never inward),
---   * text widgets' ~1px font side bearings are the accepted tolerance.
---
--- When adding an element: give it zero hidden padding, then align its
--- box to a frame line. Never shift an element to compensate for its
--- own internals -- fix the component instead. Change FRAME_PAD_PTS and
--- the whole frame follows.
---
--- Everything else here is the usual single-source geometry: chrome
--- zone heights, board cell, notation gutters. `compute` is pure math --
--- no KOReader imports, no widgets. Callers pass the glass size, a
--- pt->px `scale` function and `status_h` (the one measured input), and
--- get back plain rects. Builders elsewhere consume those rects and
--- measure nothing, so a change in one zone can no longer silently
--- resize another, and spec/layout_spec.lua can pin the invariants.
---
--- Coordinates are relative to the CONTENT box (its origin is FRAME_PAD
--- in from the glass top-left). `lines` holds the absolute glass
--- coordinates of the frame lines.
-
+-- Gameplay geometry. The 1080x1440 profile is the design master; other
+-- screens keep the same relationships and integral chessboard squares.
+local Design = require("ui.gameplay_design")
 local Layout = {}
 
--- Nominal (unscaled) inset from the glass on all four sides: the frame
--- every element's ink aligns to. See THE FRAME CONTRACT above.
-Layout.FRAME_PAD_PTS = 16
+Layout.DESIGN_W = Design.master.w
+Layout.DESIGN_H = Design.master.h
+Layout.SIDE_PAD = Design.master.content.x
+Layout.VERTICAL_PAD = 12
+Layout.HUD_H = Design.regions.top_hud.h
+Layout.BOTTOM_HUD_H = Design.regions.chess_bottom.h
+Layout.PUZZLE_FOOTER_H = Design.regions.puzzle_bottom.h
+Layout.HUD_BOARD_GAP = 8
+Layout.FILE_HUD_GAP = 23 -- 8px rhythm plus 15px clearance below file notation
+Layout.BOARD_NAV_GAP = 10
+Layout.NAV_H = 46
+Layout.FILE_RAIL_H = 40 -- 10px top air followed by the 30px notation band
+Layout.FRAME_PAD_PTS = 32 -- compatibility for non-game callers
 
--- Chrome zone metrics (nominal pts).
-local CHROME = {
-    nav_button_h = 20, -- bottom bar's one-row basis (bar ink is pinned
-                       -- to the bottom line; the rest is its air)
-    toolbar_pad  = 4,  -- vertical padding around toolbar buttons
-    bottom_extra = 4,  -- extra breathing room under the bottom bar
-    log_font     = 14, -- eval / pgn line font
-    log_lines    = 2,  -- pgn line + eval line
-    strip_gap    = 4,  -- between a player strip and the board
-}
-
---- Height of one notation line (the pgn line or the eval line). Both
---- the strip-height input (computed by the app before `compute`) and
---- the pgn/eval widgets consume this one number.
 function Layout.logLineHeight(scale)
     scale = scale or function(n) return n end
-    return scale(CHROME.log_font) + 4
+    return scale(25) + 4
 end
 
---- Scaled chrome sizes of the board's coordinate frame. Notation lives
---- on the LEFT (ranks) and BOTTOM (files) only; the right gutter mirrors
---- the left so the squares stay centered. Both the board widget
---- (Board:init) and the cell math below consume this one table, so the
---- budget here and the widget there can never drift apart.
+-- Coordinates are painted inside the edge squares and cost no board space.
 function Layout.boardMetrics(scale)
     scale = scale or function(n) return n end
-    local board_padding = scale(8)
-    -- Coordinate labels, sized for legibility at arm's length; the row
-    -- height tracks the label. The gap keeps the labels off the board's
-    -- squares (it also pads the file letters' row below the grid).
-    local coord_label   = scale(16)
-    local coord_row_h   = scale(21)
-    local coord_outer   = scale(1)
-    local coord_gap     = scale(6)
+    return { board_padding=0, coord_label=scale(25), coord_row_h=0,
+        coord_outer=0, coord_gap=0, side_zone_w=0, file_zone_h=0 }
+end
+
+function Layout.compute(opts)
+    local sw, sh = assert(opts.screen_w), assert(opts.screen_h)
+    local k = math.min(sw / Layout.DESIGN_W, sh / Layout.DESIGN_H)
+    local hud_h = math.floor(Layout.HUD_H * k + 0.5)
+    local bottom_hud_h = math.floor((opts.puzzle_footer and
+        Layout.PUZZLE_FOOTER_H or Layout.BOTTOM_HUD_H) * k + 0.5)
+    local hud_gap = math.floor(Layout.HUD_BOARD_GAP * k + 0.5)
+    local file_hud_gap = math.floor(Layout.FILE_HUD_GAP * k + 0.5)
+    local file_rail_h = math.floor(Layout.FILE_RAIL_H * k + 0.5)
+    -- Scale the board with the complete 4:3 design, never independently from
+    -- the window width. This is what keeps a resized/non-4:3 emulator from
+    -- clipping the vertical composition.
+    local cell = math.max(1, math.floor((Design.regions.board.w * k) / 8))
+    local board_w = cell * 8
+    local x = math.floor((sw - board_w) / 2)
+    -- History now lives inside the bottom HUD. Keep that HUD on the lower
+    -- design anchor; the former navigation row becomes a quiet spacer after
+    -- the board's compact file rail.
+    local composed_h = math.floor(Layout.DESIGN_H * k + 0.5)
+    local top = math.max(0, math.floor((sh - composed_h) / 2))
+    if sw == Layout.DESIGN_W and sh == Layout.DESIGN_H then top = 12 end
+    local board_y = top + hud_h + hud_gap
+    local file_rail_y = board_y + board_w
+    -- Keep 23px between the 40px file rail (10px air + 30px notation band)
+    -- and the bottom rule: the base 8px rhythm plus 15px extra clearance.
+    -- used to belong to the full-width history toolbar.
+    local bottom_hud_y = file_rail_y + file_rail_h + file_hud_gap
+    if opts.puzzle_footer then
+        -- The puzzle footer is pinned to the bottom edge. On the design
+        -- master this puts its divider at y=1278 and its contents at y=1279.
+        bottom_hud_y = sh - bottom_hud_h
+    end
+
     return {
-        board_padding = board_padding,
-        coord_label   = coord_label,
-        coord_row_h   = coord_row_h,
-        coord_outer   = coord_outer,
-        coord_gap     = coord_gap,
-        -- Per-side horizontal chrome (left AND right, mirrored): the
-        -- notation gutter is exactly [outer margin][rank col][gap] --
-        -- nothing more, the squares need no wider a frame.
-        side_zone_w   = coord_outer + coord_label + coord_gap,
-        -- Vertical chrome BELOW the grid: [file row][gap]. The top has
-        -- no notation, so no zone is reserved there.
-        file_zone_h   = coord_row_h + coord_gap,
+        pad=x, pad_x=x, pad_y=top,
+        content={w=board_w, h=sh - 2 * top},
+        lines={left=x, right=x+board_w, top=top, bottom=sh-top},
+        chrome={line_h=Layout.logLineHeight(opts.scale), strip_gap=hud_gap},
+        top_hud={x=x,y=top,w=board_w,h=hud_h,rotation=180},
+        board={x=x,y=board_y,w=board_w,height=board_w,cell=cell,
+            squares_w=board_w,zone_h=board_w,gutter_w=0,
+            strip_h=hud_h,bottom_strip_h=hud_h},
+        file_rail={x=x,y=file_rail_y,w=board_w,h=file_rail_h},
+        rank_rail={x=x+board_w,y=board_y,w=sw-(x+board_w),h=board_w},
+        bottom_hud={x=x,y=bottom_hud_y,w=board_w,h=bottom_hud_h,rotation=0},
     }
 end
 
---- Compute the screen layout.
----
---- opts:
----   screen_w, screen_h : glass size
----   status_h           : measured top bar height (the one measured input)
----   strip_h            : measured top player strip height (notation
----                        block vs clock card, whichever is taller)
----   bottom_strip_h     : measured bottom strip height (defaults to
----                        strip_h; taller when the Engine Hints line
----                        adds a third notation row). Both strips are
----                        part of the board's unit.
----   scale              : pt -> px (defaults to identity, for specs)
----   metrics            : Layout.boardMetrics(scale) (required)
----
---- Returns (all x/y relative to the content box):
----   pad, content {w,h}, lines {left,right,top,bottom} (glass coords),
----   chrome {line_h, strip_gap, bottom_h},
----   board {cell, height, squares_w, zone_h, gutter_w, strip_h}.
-function Layout.compute(opts)
-    assert(opts.metrics, "Layout.compute: board metrics required")
-    local scale = opts.scale or function(n) return n end
-    local M = opts.metrics
-
-    local pad = scale(Layout.FRAME_PAD_PTS)
-    local content_w = opts.screen_w - 2 * pad
-    local content_h = opts.screen_h - 2 * pad
-
-    -- Chrome zone heights, stacked inside the content box: top bar
-    -- (measured), the middle zone, bottom bar. The middle zone is ONE
-    -- centered unit -- [Black's strip][board][White's strip] -- so it
-    -- spans from the top bar right down to the bottom bar.
-    local line_h   = Layout.logLineHeight(scale)
-    local bottom_h = scale(CHROME.nav_button_h) + 2 * scale(CHROME.toolbar_pad)
-        + scale(CHROME.bottom_extra)
-    local zone_h   = content_h - opts.status_h - bottom_h
-    assert(zone_h > 0, "Layout.compute: screen too short for the board")
-
-    -- The unit's vertical chrome: both strips plus the gaps that
-    -- separate them from the board. Whatever is left is the board's.
-    local strip_h   = opts.strip_h or 0
-    local bottom_strip_h = opts.bottom_strip_h or strip_h
-    local strip_gap = scale(CHROME.strip_gap)
-    local h_budget  = zone_h - strip_h - bottom_strip_h - 2 * strip_gap
-        - M.file_zone_h - 2 * M.board_padding
-    assert(h_budget > 0, "Layout.compute: screen too short for the board")
-
-    -- Board: one cell size decides everything. The board widget paints
-    -- its squares at exactly the given cell (ButtonTable honours
-    -- per-button widths), so squares_w == 8*cell and the gutter is
-    -- whatever the coordinate chrome leaves over -- computed here,
-    -- before anything is built. The gutters are symmetric by
-    -- construction: each side reserves exactly the notation width plus
-    -- the frame's side padding, so the squares sit dead center in the
-    -- content box.
-    local w_budget = content_w - M.board_padding - 2 * M.side_zone_w
-    local cell = math.min(math.floor(w_budget / 8), math.floor(h_budget / 8))
-    assert(cell > 0, "Layout.compute: screen too narrow for the board")
-
-    local squares_w = cell * 8
-    local gutter_w = math.floor((content_w - squares_w) / 2)
-
+function Layout.puzzleActions(content_w, bottom_h)
+    local k=content_w/Design.master.content.w
+    local function scaled(name) return Design.rect(Design.puzzle[name],k) end
+    local y=Design.round(Design.puzzle.action_y,k); local h=Design.round(Design.puzzle.action_h,k)
     return {
-        pad = pad,
-        content = { w = content_w, h = content_h },
-        lines = {
-            left = pad,
-            right = opts.screen_w - pad,
-            top = pad,
-            bottom = opts.screen_h - pad,
-        },
-        chrome = {
-            line_h = line_h,
-            strip_gap = strip_gap,
-            bottom_h = bottom_h,
-        },
-        board = {
-            cell = cell,
-            -- Matches the board widget's real built height: grid, the
-            -- padding frame around it, and the file-label row below.
-            height = squares_w + 2 * M.board_padding + M.file_zone_h,
-            squares_w = squares_w,
-            zone_h = zone_h,
-            gutter_w = gutter_w,
-            strip_h = strip_h,
-            bottom_strip_h = bottom_strip_h,
-        },
+        y=y,h=h,order={"previous","next","hint"},
+        menu=scaled("menu"), previous=scaled("previous"),
+        next=scaled("next"), hint=scaled("hint"),
     }
 end
 

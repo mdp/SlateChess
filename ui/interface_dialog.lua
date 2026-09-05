@@ -36,9 +36,12 @@ function InterfaceWidget.new(_self, opts)
             opponent_hints = init.opponent_hints == true,
             check_hints = init.check_hints == true,
             rotate_top_pieces = init.rotate_top_pieces == true,
+            flip_pieces_each_turn = init.flip_pieces_each_turn == true,
             thinking_indicator = init.thinking_indicator ~= false,
             show_eval = init.show_eval ~= false,
             show_hints = init.show_hints == true,
+            show_engine_elo = init.show_engine_elo ~= false,
+            show_computer_captures = init.show_computer_captures ~= false,
             figurine_pgn = init.figurine_pgn == true,
         },
     }, InterfaceWidget)
@@ -98,6 +101,8 @@ function InterfaceWidget:buildOptions()
         gap,
         self:makeToggle("show_eval", _("Engine Evals")),
         self:makeToggle("show_hints", _("Engine Hints")),
+        self:makeToggle("show_engine_elo", _("Computer ELO")),
+        self:makeToggle("show_computer_captures", _("Computer Captures")),
         self:makeToggle("figurine_pgn", _("Figurine Notation")),
         self:makeToggle("show_selected", _("Highlight Selected")),
         VerticalSpan:new{ width = Size.padding.small },
@@ -110,6 +115,8 @@ function InterfaceWidget:buildOptions()
         self:makeToggle("check_hints", _("Check Hints")),
         VerticalSpan:new{ width = Size.padding.small },
         self:makeToggle("rotate_top_pieces", _("Invert Opponent Pieces")),
+        VerticalSpan:new{ width = Size.padding.small },
+        self:makeToggle("flip_pieces_each_turn", _("Flip pieces to player on each turn")),
     }
 end
 
@@ -122,12 +129,26 @@ function InterfaceWidget:applyPreview()
     board.previous_move_hints = self.changes.previous_move_hints
     board.opponent_hints = self.changes.opponent_hints
     board.check_hints = self.changes.check_hints
-    -- rotate_top_pieces is applied by the parent's derived orientation logic.
-    -- For live preview, honor it directly only when not human-vs-human.
+    -- Piece orientation is derived by the parent (updateBoardOrientation).
+    -- The live preview mirrors it: human-vs-human either pivots the whole
+    -- board toward the side to move ("Flip pieces to player on each turn"
+    -- on) or keeps the fixed board with far pieces angled to their owner
+    -- (off); against the computer it's the rotate preference directly.
     local hvh = self.parent and self.parent.game
         and self.parent.game:isHuman(Chess.WHITE)
         and self.parent.game:isHuman(Chess.BLACK)
-    board.rotate_top_pieces = (not hvh) and (self.changes.rotate_top_pieces and true or false) or false
+    if hvh then
+        board.rotate_top_pieces = (not self.changes.flip_pieces_each_turn) and true or false
+        if self.changes.flip_pieces_each_turn then
+            board.face_color = (self.parent.running and self.parent.game)
+                and self.parent.game:turn() or Chess.WHITE
+        else
+            board.face_color = Chess.WHITE
+        end
+    else
+        board.rotate_top_pieces = self.changes.rotate_top_pieces and true or false
+        board.face_color = Chess.WHITE
+    end
     board:updateBoard()
 
     -- Engine evals live on the notation strips, not the board: refresh
@@ -215,7 +236,10 @@ function InterfaceWidget:resetToDefaults()
     self.changes.opponent_hints = false
     self.changes.check_hints = false
     self.changes.rotate_top_pieces = false
+    self.changes.flip_pieces_each_turn = false
     self.changes.thinking_indicator = true
+    self.changes.show_engine_elo = true
+    self.changes.show_computer_captures = true
     self:saveAndClose()
 end
 

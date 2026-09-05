@@ -1,0 +1,32 @@
+local Fit=require("ui.fitted_text")
+local function metrics(s,size)
+    local n=0
+    for _ in s:gmatch("[\1-\127\194-\244][\128-\191]*") do n=n+1 end
+    return {w=n*size,h=size+4}
+end
+
+describe("fitted text",function()
+    it("keeps target size when measured bounds fit",function()
+        local r=Fit.choose("abc","primary",{w=100,h=25},1,metrics,true)
+        assert.equals(19,r.size); assert.is_false(r.truncated)
+    end)
+    it("reduces for measured height and width",function()
+        local h=Fit.choose("a","primary",{w=100,h=18},1,metrics,true)
+        assert.equals(14,h.size)
+        local w=Fit.choose("abcdef","primary",{w=78,h=25},1,metrics,true)
+        assert.equals(13,w.size)
+    end)
+    it("ellipsizes dynamic copy at a glyph boundary",function()
+        local r=Fit.choose("abcdefghij","primary",{w=3,h=25},1,metrics,true)
+        assert.is_true(r.truncated); assert.equals("ab…",r.text)
+    end)
+    it("asserts fixed copy instead of truncating it",function()
+        assert.has_error(function()
+            Fit.choose("abcdefghij","primary",{w=0,h=25},1,metrics,false)
+        end)
+    end)
+    it("scales the role minimum",function()
+        local r=Fit.choose("abcdefghij","primary",{w=96,h=50},2,metrics,true)
+        assert.is_true(r.size>=2)
+    end)
+end)

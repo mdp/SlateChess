@@ -11,15 +11,17 @@ local Clock = {}
 Clock.__index = Clock
 
 --- `control` = { base = {w=seconds, b=seconds}, increment = {w=secs, b=secs} }
--- `opts.now` overrides the time source (defaults to os.time) — that is the
--- seam that makes the clock testable.
+-- `opts.now` is mandatory — the time source in seconds (the pure module
+-- never reads the wall clock; the core purity gate bans os.*).
 function Clock:new(control, opts)
     opts = opts or {}
+    assert(type(opts.now) == "function",
+        "clock: opts.now is required (host-testable time source)")
     control = control or {}
     local base      = control.base or {}
     local increment = control.increment or {}
     local o = setmetatable({}, self)
-    o.now       = opts.now or os.time
+    o.now       = opts.now
     o.base      = { w = tonumber(base.w) or 0, b = tonumber(base.b) or 0 }
     o.increment = { w = tonumber(increment.w) or 0, b = tonumber(increment.b) or 0 }
     o.time      = { w = o.base.w, b = o.base.b }

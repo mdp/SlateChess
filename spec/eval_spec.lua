@@ -141,10 +141,9 @@ describe("Eval.figurine", function()
     end)
 end)
 
-describe("Eval.parseInfo with chal-style lines", function()
-    -- Chal omits the multipv token entirely (single PV); parseInfo must
-    -- still accept its lines, and parsePv must reject them so the hints
-    -- line falls back to bestmove + last score.
+describe("Eval.parseInfo with single-PV lines", function()
+    -- Some engines omit the multipv token entirely (single PV); parseInfo must
+    -- accept its lines, including its implicit single principal variation.
     local line = "info depth 16 score cp 24 nodes 692843 time 567 nps 1221 pv c1f4 g8f6"
 
     it("parses an info line without a multipv token", function()
@@ -152,7 +151,154 @@ describe("Eval.parseInfo with chal-style lines", function()
         assert.same({ multipv = 1, cp = 24, mate = nil }, info)
     end)
 
-    it("does not treat a chal line as a hint PV (no multipv)", function()
-        assert.is_nil(Eval.parsePv(line))
+    it("treats a line without multipv as implicit multipv 1", function()
+        assert.same({ multipv = 1, cp = 24, mate = nil, move = "c1f4" },
+            Eval.parsePv(line))
+    end)
+end)
+
+describe("Eval.captured / Eval.capturedGlyphs", function()
+    local Game = require("core.game")
+
+    it("finds nothing in an empty history", function()
+        local caps = Eval.captured({})
+        assert.same({ w = {}, b = {} }, caps)
+        local glyphs = Eval.capturedGlyphs({})
+        assert.equals("", glyphs.w)
+        assert.equals("", glyphs.b)
+    end)
+
+    it("counts a pawn capture for each side", function()
+        local game = Game:new()
+        game:playMove("e4")
+        game:playMove("d5")
+        game:playMove("exd5")
+        -- White captured a black pawn; nothing of White's is gone yet.
+        local caps = Eval.captured(game:moveHistory())
+        assert.same({ p = 1 }, caps.b)
+        assert.same({}, caps.w)
+        game:playMove("Qxd5")
+        -- Black's queen took the white pawn on d5.
+        caps = Eval.captured(game:moveHistory())
+        assert.same({ p = 1 }, caps.b)
+        assert.same({ p = 1 }, caps.w)
+        -- Glyphs: one filled pawn for the taken black piece, one
+        -- outlined pawn for the taken white piece.
+        local glyphs = Eval.capturedGlyphs(game:moveHistory())
+        assert.equals("♟", glyphs.b)
+        assert.equals("♙", glyphs.w)
+    end)
+
+    it("renders glyphs in capture order, pawns first", function()
+        -- 1. e4 e5 2. Qh5 Nf6 3. Qxf7+ Kxf7: White took a pawn then
+        -- lost the queen; Black lost the f7 pawn and took the queen
+        -- back.
+        local game = Game:new()
+        game:playMove("e4")
+        game:playMove("e5")
+        game:playMove("Qh5")
+        game:playMove("Nf6")
+        game:playMove("Qxf7") -- takes the f7 pawn
+        local caps = Eval.captured(game:moveHistory())
+        assert.same({ p = 1 }, caps.b)
+        assert.same({}, caps.w)
+        game:playMove("Kxf7") -- the king recovers the queen
+        caps = Eval.captured(game:moveHistory())
+        assert.same({ p = 1 }, caps.b)
+        assert.same({ q = 1 }, caps.w)
+        local glyphs = Eval.capturedGlyphs(game:moveHistory())
+        assert.equals("♟", glyphs.b)
+        assert.equals("♕", glyphs.w)
+    end)
+
+    it("counts piece captures, not just pawns", function()
+        -- 1. e4 e5 2. Nf3 Nc6 3. Nxe5 Nxe5: Black lost the e5 pawn,
+        -- White lost the knight that took it. Glyphs order pawns
+        -- before knights.
+        local game = Game:new()
+        game:playMove("e4")
+        game:playMove("e5")
+        game:playMove("Nf3")
+        game:playMove("Nc6")
+        game:playMove("Nxe5")
+        game:playMove("Nxe5")
+        local caps = Eval.captured(game:moveHistory())
+        assert.same({ p = 1 }, caps.b)
+        assert.same({ n = 1 }, caps.w)
+        local glyphs = Eval.capturedGlyphs(game:moveHistory())
+        assert.equals("♟", glyphs.b)
+        assert.equals("♘", glyphs.w)
+    end)
+
+    it("handles en passant and promotions from the history", function()
+        -- En passant: 1. e4 a6 2. e5 d5 3. exd6 e.p.
+        local game = Game:new()
+        game:playMove("e4")
+        game:playMove("a6")
+        game:playMove("e5")
+        game:playMove("d5")
+        game:playMove("exd6")
+        assert.same({ p = 1 }, Eval.captured(game:moveHistory()).b)
+
+        -- Promotion is not a capture; capturing the promoted piece
+        -- counts only the piece it became.
+        local g2 = Game:new({ fen = "8/P6k/8/8/8/8/r7/1K6 w - - 0 1" })
+        g2:playUci("a7a8q")
+        assert.same({}, Eval.captured(g2:moveHistory()).w)
+        assert.same({}, Eval.captured(g2:moveHistory()).b)
+        g2:playUci("a2a8") -- the rook takes the promoted queen
+        local caps = Eval.captured(g2:moveHistory())
+        assert.same({ q = 1 }, caps.w)
+        assert.same({}, caps.b)
+        assert.equals("♕", Eval.capturedGlyphs(g2:moveHistory()).w)
+        assert.equals("", Eval.capturedGlyphs(g2:moveHistory()).b)
+    end)
+end)
+
+describe("Eval.capturedPieces", function()
+    local Game = require("core.game")
+
+    it("returns empty lists for the initial position", function()
+        local pieces = Eval.capturedPieces({})
+        assert.same({}, pieces.w)
+        assert.same({}, pieces.b)
+    end)
+
+    it("lists taken pieces as letters, pawns first", function()
+        -- 1. e4 e5 2. Nf3 Nc6 3. Nxe5 Nxe5: Black lost the e5 pawn,
+        -- White lost the knight that took it.
+        local game = Game:new()
+        game:playMove("e4")
+        game:playMove("e5")
+        game:playMove("Nf3")
+        game:playMove("Nc6")
+        game:playMove("Nxe5")
+        game:playMove("Nxe5")
+        local pieces = Eval.capturedPieces(game:moveHistory())
+        -- White lost the knight (taken white pieces), Black the pawn.
+        assert.same({ "N" }, pieces.w)
+        assert.same({ "P" }, pieces.b)
+    end)
+
+    it("counts a captured promoted piece by what it became", function()
+        local g2 = Game:new({ fen = "8/P6k/8/8/8/8/r7/1K6 w - - 0 1" })
+        g2:playUci("a7a8q")
+        g2:playUci("a2a8") -- the rook takes the promoted queen
+        local pieces = Eval.capturedPieces(g2:moveHistory())
+        assert.same({ "Q" }, pieces.w)
+        assert.same({}, pieces.b)
+    end)
+
+    it("orders multiple pieces pawns first", function()
+        -- Rook sweeps the a-file: pawn first, then the knight that
+        -- was behind it. Two pieces, pawns-first order.
+        local g3 = Game:new({ fen = "7k/n7/8/8/p7/8/8/R6K w - - 0 1" })
+        g3:playUci("a1a4") -- rook takes the pawn
+        g3:playUci("h8g8") -- the king steps aside
+        g3:playUci("a4a7") -- rook takes the knight
+        local pieces = Eval.capturedPieces(g3:moveHistory())
+        -- The rook captured BLACK pieces, so they list under `b`.
+        assert.same({}, pieces.w)
+        assert.same({ "P", "N" }, pieces.b)
     end)
 end)

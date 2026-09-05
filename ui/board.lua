@@ -6,6 +6,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local Chess = require("chess/src/chess")
 local Device = require("device")
 local Screen = Device.screen
+local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
 
 local OverlapGroup = require("ui/widget/overlapgroup")
@@ -13,7 +14,9 @@ local IconWidget   = require("ui/widget/iconwidget")
 local iconresolver = require("ui.icons")
 
 local BOARD_SIZE = 8
-local SELECTED_BORDER = 5
+-- Button borders are kept at zero; selection is a true inset overlay rather
+-- than a border that changes a square's measured geometry.
+local SELECTED_BORDER = 0
 
 local icons = { empty = "slatechess/empty" }
 for _, letter in ipairs({ "P", "N", "B", "R", "Q", "K" }) do
@@ -69,6 +72,10 @@ end
 --- cards) -- never recompute it from nominal constants.
 function Board:gridGeometry()
     local c = self._coord
+    if c and c.inline then
+        return { left=c.left, top=c.top, w=c.table_w, h=c.table_h,
+            cell=self.button_size }
+    end
     return {
         -- [left_pad slack][outer margin][rank col][gap][frame pad] ->
         -- the grid's left edge.
@@ -95,7 +102,6 @@ function Board:init()
     -- overrides the base class without that setup, so this must run on
     -- every init, cell or not.
     local margins = self:allMarginSizes()
-    local bt_pad_v = Screen:scaleBySize(4)
     -- Board chrome comes from ui/layout.lua's shared metrics table: the
     -- layout computes the cell size from the same numbers, so the
     -- widget and the budget can never drift apart.
@@ -104,7 +110,8 @@ function Board:init()
     self.board_padding = m.board_padding
     -- Coordinate labels (a-h / 1-8) live in narrow gutters: ranks on the
     -- left, files along the bottom. The right gutter mirrors the left's
-    -- width but stays empty, so the squares stay perfectly centered.
+    -- width but stays empty of chrome -- the taken pieces live there
+    -- (ui/capture_gutter), painted over the empty slack.
     self.coord_label_size = m.coord_label
     self.coord_label_row_h = m.coord_row_h
     self.coord_outer_margin = m.coord_outer
@@ -126,7 +133,7 @@ function Board:init()
         )
     end
     self.button_size  = cell
-    self.icon_height  = cell - 2 * bt_pad_v
+    self.icon_height  = math.floor(cell * 0.78 + 0.5)
 
     self.selected = nil
 
@@ -157,81 +164,24 @@ function Board:init()
     }
 
     self:applySquareColors()
+    -- The heads-up board has no external coordinate frame.  Keep the table
+    -- as the whole widget and let ui/marks_overlay paint coordinates inside
+    -- its edge squares after pieces and move marks.
     local CenterContainer = require("ui/widget/container/centercontainer")
     local table_size = self.table:getSize()
-    local padded = FrameContainer:new{
-        bordersize     = 0,
-        background     = self.background,
-        padding        = 0,
-        padding_top    = self.board_padding / 2,
-        padding_left   = self.board_padding / 2,
-        padding_right  = self.board_padding / 2,
-        padding_bottom = self.board_padding / 2,
-        CenterContainer:new{
-            dimen = Geom:new{ w = table_size.w, h = table_size.h + self.board_padding },
-            self.table,
-        },
+    local left = math.floor((self.width - table_size.w) / 2)
+    local top = math.floor((self.height - table_size.h) / 2)
+    self._coord = { inline=true, left=left, top=top,
+        table_w=table_size.w, table_h=table_size.h }
+    self[1] = CenterContainer:new{
+        dimen = Geom:new{ w=self.width, h=self.height }, self.table,
     }
-
-    -- Coordinate labels: rank numbers along a vertical edge, file letters
-    -- along a horizontal edge. Which edges they occupy depends on the
-    -- orientation (see updateCoordinates); the mirror zones stay reserved
-    -- so the board never shifts when it flips.
-    local Font = require("ui/font")
-    local TextWidget = require("ui/widget/textwidget")
-    local VerticalGroup = require("ui/widget/verticalgroup")
-    local HorizontalGroup = require("ui/widget/horizontalgroup")
-    local HorizontalSpan = require("ui/widget/horizontalspan")
-    local coord_face = Font:getFace("smallinfofont", self.coord_label_size)
-    local label_w = self.coord_label_size
-    local btn_size = self.button_size
-
-    self._rank_labels = {}
-    local rank_col = VerticalGroup:new{ width = label_w }
-    for i = 1, BOARD_SIZE do
-        local lbl = TextWidget:new{ text = "", face = coord_face, fgcolor = Blitbuffer.COLOR_BLACK }
-        self._rank_labels[i] = lbl
-        rank_col[#rank_col + 1] = CenterContainer:new{
-            dimen = Geom:new{ w = label_w, h = btn_size },
-            lbl,
-        }
-    end
-
-    self._file_labels = {}
-    local file_row = HorizontalGroup:new{}
-    for i = 1, BOARD_SIZE do
-        local lbl = TextWidget:new{ text = "", face = coord_face, fgcolor = Blitbuffer.COLOR_BLACK }
-        self._file_labels[i] = lbl
-        file_row[#file_row + 1] = CenterContainer:new{
-            dimen = Geom:new{ w = btn_size, h = self.coord_label_row_h },
-            lbl,
-        }
-    end
-
-    self._coord = {
-        padded       = padded,
-        rank_col     = rank_col,
-        file_row     = file_row,
-        side_zone_w  = side_zone_w,
-        file_zone_h  = file_zone_h,
-        table_w      = table_size.w,
-        table_h      = table_size.h,
-        CenterContainer = CenterContainer,
-        VerticalGroup = VerticalGroup,
-        HorizontalGroup = HorizontalGroup,
-        HorizontalSpan = HorizontalSpan,
-        VerticalSpan = require("ui/widget/verticalspan"),
-        Geom = Geom,
-    }
-    self._coord_laid_out = false
-
-    self:updateCoordinates()
-
 end
 
 -- Rebuild the coordinate layout: notation lives on the left (ranks) and
 -- along the bottom (files) only. The right gutter mirrors the left's
--- width but stays empty, so the squares remain perfectly centered.
+-- width but stays empty of chrome; the taken pieces paint over its
+-- slack, so the squares remain perfectly centered.
 function Board:rebuildCoordinateLayout()
     local c = self._coord
     local CC, VG, HG, HSpan, VSpan, CGeom =
@@ -252,7 +202,8 @@ function Board:rebuildCoordinateLayout()
     -- margins, rounding). Distribute it evenly around the row block so
     -- the grid is centered in the widget and the left / right gutters
     -- match. Per side: [outer margin][rank col][gap][frame pad] -- and
-    -- nothing more; the squares need no wider a frame.
+    -- nothing more; the spoils columns center in the right gutter's
+    -- slack.
     local row_w = 2 * side_w + self.board_padding + c.table_w
     local slack = math.max(0, self.width - row_w)
     local left_pad = math.floor(slack / 2)
@@ -353,6 +304,11 @@ function Board:createSquareButton(file, rank)
         icon = icons.empty,
         alpha = true,
         width      = self.button_size,
+        -- ButtonTable always adds its own vertical padding around `height`.
+        -- Compensate here so the OUTER button frame is exactly cell x cell;
+        -- passing cell directly would make every row 2*padding pixels tall
+        -- and the 8-row grid would spill into both HUDs.
+        height     = math.max(1, self.button_size - 2 * Size.padding.buttontable),
         icon_width = self.button_size,
         icon_height = self.icon_height,
         bordersize = Screen:scaleBySize(SELECTED_BORDER),
@@ -478,15 +434,15 @@ function Board:handleMove(from, to)
     if is_pawn_promotion and self.onPromotionNeeded then
         self:unmarkSelected(from)
         self.onPromotionNeeded(from, to, piece.color)
-    else
-        local move = self.game:playMove{ from = from, to = to }
-        if move then
-            self:handleGameMove(move)
-        else
-
-            self:unmarkSelected(from)
-            self:updateBoard()
+    elseif legal_move then
+        -- The controller owns the game now: report the desired move and
+        -- let it play and repaint (through the arbiter).
+        if self.moveCallback then
+            self.moveCallback{ from = from, to = to, promotion = nil }
         end
+    else
+        self:unmarkSelected(from)
+        self:updateBoard()
     end
 end
 

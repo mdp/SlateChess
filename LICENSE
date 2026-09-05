@@ -706,13 +706,13 @@ of the following projects and authors:
     arizati/chess.lua — https://github.com/arizati/chess.lua
     a Lua port of chess.js, Copyright (C) Jeff Hlywa (BSD-2-Clause)
 
-  Chal engine, vendored under engines/chal.c (with local patches)
-    Copyright (C) Naman Thanki (MIT)
-    https://github.com/namanthanki/chal
+  Berserk chess engine
+    Copyright (C) 2024 Jay Honnold (GPL-3.0-or-later)
+    https://github.com/jhonnold/Berserk
 
   Chess piece icons (icons/*.svg), derived from the Cburnett set
     Colin M. L. Burnett — GPL-2.0-or-later
 
-These incorporated works are licensed under GPL-2.0-or-later, GPL-3.0,
-MIT, or BSD-2-Clause, and are all distributed here as part of this
+These incorporated works are licensed under GPL-2.0-or-later,
+GPL-3.0-or-later, or BSD-2-Clause, and are all distributed here as part of this
 GPL-3.0-or-later work.
