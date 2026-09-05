@@ -66,18 +66,32 @@ jobs:
       - name: Build the Kindle engine binary
         run: sh engines/fetch.sh kindle
 
-      - name: Package plugin
-        run: make package
-
-      - name: Sanity-check the zip
+      - name: Package both plugins
         run: |
-          unzip -l dist/*.zip
-          unzip -l dist/*.zip | grep -E "engines/chal$" || {
+          make package
+          make puzzle-package
+
+      - name: Sanity-check the chess zip
+        run: |
+          unzip -l dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip
+          unzip -l dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip | grep -E "engines/berserk$" || {
             echo "::error::The Kindle engine binary is missing from the zip"
             exit 1
           }
-          unzip -l dist/*.zip | grep -E "CHANGELOG.md" || {
+          unzip -l dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip | grep -E "CHANGELOG.md" || {
             echo "::error::CHANGELOG.md is missing from the zip (the About dialog reads it)"
+            exit 1
+          }
+
+      - name: Sanity-check the puzzle zip
+        run: |
+          unzip -l dist/slatepuzzle.koplugin.v${GITHUB_REF_NAME#v}.zip
+          unzip -l dist/slatepuzzle.koplugin.v${GITHUB_REF_NAME#v}.zip | grep -E "data/puzzles.json" || {
+            echo "::error::The puzzle bank is missing from the zip"
+            exit 1
+          }
+          unzip -l dist/slatepuzzle.koplugin.v${GITHUB_REF_NAME#v}.zip | grep -E "_meta.lua" || {
+            echo "::error::_meta.lua is missing from the zip"
             exit 1
           }
 

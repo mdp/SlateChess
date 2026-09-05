@@ -78,10 +78,16 @@ package: check-version
 	@rm -f $(DIST_DIR)/$(ZIP_NAME)
 	zip -r $(DIST_DIR)/$(ZIP_NAME) . \
 		-x '*/.git/*' '.git/*' \
-		-x '.gitignore' \
+		-x '.gitignore' '.gitmodules' \
 		-x '$(DIST_DIR)/*' 'dist/*' \
 		-x 'screenshots/*' \
 		-x 'spec/*' \
+		-x 'koreader/*' \
+		-x 'docs/*' \
+		-x '.github/*' \
+		-x 'tools/*' \
+		-x 'puzzle/*' \
+		-x 'data/puzzles.json' \
 		-x 'engines/stockfish*' 'engines/berserk-arm64' 'engines/berserk-x64' \
 		-x 'Makefile' '.luacheckrc' 'CONTEXT.md' 'README.md' \
 		-x 'e-reader-resolutions.md' \

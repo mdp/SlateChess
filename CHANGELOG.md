@@ -4,7 +4,7 @@ All notable changes to SlateChess. The format is Keep a Changelog-ish;
 newest first. SlateChess is a fork of Casual Chess for KOReader — see
 LICENSE for the full attribution history.
 
-## Unreleased
+## [1.1.0] - 2026-09-05
 
 ### Adaptive puzzle difficulty
 - New puzzle profiles start in **Adaptive** mode at 1200. Puzzles stay within

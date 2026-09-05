@@ -660,7 +660,9 @@ function App:updateStatusStrip()
     if not (self.top_hud and self.bottom_hud and self.view) then return end
     local v=self.view
     local rating = v.rating and tostring(v.rating) or "—"
-    if v.difficulty == "adaptive" and v.adaptive_rating then
+    -- The "PUZZLE / YOU" column shows the puzzle's elo and the solver's
+    -- adaptive rating side by side, whatever the band filter happens to be.
+    if v.adaptive_rating then
         rating = rating .. " / " .. tostring(v.adaptive_rating)
     end
     self.top_hud:setData{progress=("%d / %d"):format(v.index or 0,v.total or 0),

@@ -101,14 +101,20 @@ sh engines/fetch.sh kindle   # cross-compiles static 32-bit ARM (needs zig)
 
 ## Install
 
-Download the latest release zip and unzip it into your KOReader plugins
+Download the latest release zip(s) and unzip them into your KOReader plugins
 directory:
 
 https://github.com/mdp/SlateChess/releases
 
-The zip contains a `slatechess.koplugin/` folder — it should end up at
-`<koreader>/plugins/slatechess.koplugin/`. Then restart KOReader and look for
-**SlateChess** under Tools.
+Each release ships two self-contained plugins:
+
+- **`slatechess.koplugin`** — the chess app (board, clock, engines, PGN).
+- **`slatepuzzle.koplugin`** — the 12,000-puzzle trainer with the adaptive
+  `YOU` rating.
+
+Unzip either into `<koreader>/plugins/` so the `*.koplugin/` folder lands at
+`<koreader>/plugins/<name>.koplugin/`, then restart KOReader. Look for
+**SlateChess** and **SlatePuzzle** under Tools.
 
 ## Development
 
@@ -160,4 +166,7 @@ asserting the Arbiter view and the rendered widgets at every step
 auto-detection misses it. CI could run this against a nightly emulator build.
 
 CI (GitHub Actions) installs LuaJIT 2.1 + luarocks, then runs `make test`
-and `make lint` on every push.
+and `make lint` on every push. Pushing a `v*.*.*` tag runs the release job:
+it cross-compiles the Kindle engine with Zig, builds both plugin zips
+(`make package` + `make puzzle-package`), sanity-checks each, and attaches
+them to a GitHub release.
