@@ -29,4 +29,12 @@ describe("fitted text",function()
         local r=Fit.choose("abcdefghij","primary",{w=96,h=50},2,metrics,true)
         assert.is_true(r.size>=2)
     end)
+    it("falls below the preferred minimum when device font metrics require it",function()
+        local function kindleMetrics(s,size)
+            return {w=#s*size,h=size+30}
+        end
+        local r=Fit.choose("PUZZLE","puzzle_kicker",{w=312,h=35},1,kindleMetrics,true)
+        assert.equals(5,r.size)
+        assert.is_false(r.truncated)
+    end)
 end)

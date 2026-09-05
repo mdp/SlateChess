@@ -23,11 +23,20 @@ function Fitted.choose(text, role, rect, k, measure, dynamic)
         if ok then return {text=text,size=size,w=m.w,h=m.h,truncated=false} end
     end
     assert(dynamic,"fixed copy does not fit its typography rectangle ("..role..")")
+    -- Font metrics differ substantially between KOReader's desktop and
+    -- device font stacks. A dynamic label must never take down the plugin
+    -- merely because the device's glyph box exceeds the preferred minimum.
+    for size=minimum-1,1,-1 do
+        local ok,m=fits(text,size)
+        if ok then return {text=text,size=size,w=m.w,h=m.h,truncated=false} end
+    end
     local glyphs=chars(text)
-    for n=#glyphs-1,0,-1 do
-        local candidate=table.concat(glyphs,"",1,n).."…"
-        local ok,m=fits(candidate,minimum)
-        if ok then return {text=candidate,size=minimum,w=m.w,h=m.h,truncated=true} end
+    for size=minimum,1,-1 do
+        for n=#glyphs-1,0,-1 do
+            local candidate=table.concat(glyphs,"",1,n).."…"
+            local ok,m=fits(candidate,size)
+            if ok then return {text=candidate,size=size,w=m.w,h=m.h,truncated=true} end
+        end
     end
     error("ellipsis does not fit its typography rectangle (" .. role .. ")")
 end
