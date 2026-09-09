@@ -78,10 +78,10 @@ jobs:
         # bestmove from a real search before publishing.
         run: |
           sudo apt-get update
-          # qemu-user carries the dynamic interpreter (/usr/bin/qemu-arm);
-          # -static and -binfmt cover the alternatives Ubuntu/Debian
-          # package the same binaries under.
-          sudo apt-get install -y qemu-user qemu-user-static qemu-user-binfmt
+          # qemu-user-static ships /usr/bin/qemu-arm-static (and provides
+          # the binfmt registration) on the Ubuntu runners; qemu-user-binfmt
+          # conflicts with it, so install only the -static package.
+          sudo apt-get install -y qemu-user-static
           mkdir -p /tmp/engine-check
           unzip -p "dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip" \
               slatechess.koplugin/engines/berserk > /tmp/engine-check/berserk
