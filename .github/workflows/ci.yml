@@ -71,6 +71,35 @@ jobs:
           make package
           make puzzle-package
 
+      - name: Smoke-test the shipped Kindle engine under QEMU
+        # The release only ever runs the static 32-bit ARM (kindle) build —
+        # dev/emulator testing uses the native x64 binary. Prove the exact
+        # binary that ships in the zip boots, speaks UCI, and returns a
+        # bestmove from a real search before publishing.
+        run: |
+          sudo apt-get update
+          # qemu-user carries the dynamic interpreter (/usr/bin/qemu-arm);
+          # -static and -binfmt cover the alternatives Ubuntu/Debian
+          # package the same binaries under.
+          sudo apt-get install -y qemu-user qemu-user-static qemu-user-binfmt
+          mkdir -p /tmp/engine-check
+          unzip -p "dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip" \
+              slatechess.koplugin/engines/berserk > /tmp/engine-check/berserk
+          chmod +x /tmp/engine-check/berserk
+          file /tmp/engine-check/berserk | tee /tmp/engine-check/type.txt
+          QEMU="$(command -v qemu-arm-static 2>/dev/null || command -v qemu-arm 2>/dev/null || true)"
+          if [ -z "$QEMU" ]; then
+            QEMU="$(find /usr/libexec /usr/bin -type f -name 'qemu-arm' -o -name 'qemu-arm-static' -o -name 'qemu-armhf*' 2>/dev/null | head -n1)"
+          fi
+          test -n "$QEMU" || { echo "::error::no qemu-arm emulator found"; exit 1; }
+          echo "using $QEMU"
+          printf 'uci\nisready\nposition startpos\ngo movetime 1000\nquit\n' \
+              | timeout 120 "$QEMU" /tmp/engine-check/berserk | tee /tmp/engine-check/out.txt
+          grep -q "id name Berserk" /tmp/engine-check/out.txt
+          grep -q "uciok"           /tmp/engine-check/out.txt
+          grep -q "bestmove"        /tmp/engine-check/out.txt
+          grep -q "ELF.*ARM"        /tmp/engine-check/type.txt
+
       - name: Sanity-check the chess zip
         run: |
           unzip -l dist/slatechess.koplugin.v${GITHUB_REF_NAME#v}.zip

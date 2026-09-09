@@ -4,6 +4,23 @@ All notable changes to SlateChess. The format is Keep a Changelog-ish;
 newest first. SlateChess is a fork of Casual Chess for KOReader — see
 LICENSE for the full attribution history.
 
+## [1.1.1] - 2026-09-09
+
+### Release zips install as documented, and the engine is guaranteed to run
+- The release checks that `make package`/`make puzzle-package` emit zips that
+  carry the `slatechess.koplugin/` / `slatepuzzle.koplugin/` folder at the top,
+  so unzipping one into `<koreader>/plugins/` lands it exactly where KOReader
+  looks. Previously the zips were flat and the README's unzip instruction
+  silently installed nothing (KOReader only loads `plugins/*.koplugin/` dirs —
+  `frontend/pluginloader.lua`).
+- `make install` / `make puzzle-install` now unzip straight into the plugins
+  dir instead of nesting the plugin folder one level too deep.
+- The engine **is** shipped in the chess zip (`engines/berserk`, the static
+  32-bit ARM build for Kindle/Kobo). The release CI now smoke-tests that exact
+  binary under QEMU — boots it, checks the UCI handshake (`uciok`), and requires
+  a real search to return a `bestmove` — so a broken engine can never be
+  published again.
+
 ## [1.1.0] - 2026-09-05
 
 ### Adaptive puzzle difficulty

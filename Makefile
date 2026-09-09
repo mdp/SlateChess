@@ -13,6 +13,7 @@ VERSION      := $(shell sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"
 DIST_DIR     := dist
 ZIP_NAME     := $(PLUGIN_NAME).v$(VERSION).zip
 PUZZLE_ZIP   := $(PUZZLE_NAME).v$(VERSION).zip
+CHESS_STAGE  := $(DIST_DIR)/$(PLUGIN_NAME)
 STAGE_DIR    := $(DIST_DIR)/$(PUZZLE_NAME)
 
 # Where to install when you run `make install`.
@@ -75,23 +76,18 @@ package: check-version
 		test -e "$$f" || { echo "Missing $$f"; exit 1; }; \
 	done
 	@mkdir -p $(DIST_DIR)
-	@rm -f $(DIST_DIR)/$(ZIP_NAME)
-	zip -r $(DIST_DIR)/$(ZIP_NAME) . \
-		-x '*/.git/*' '.git/*' \
-		-x '.gitignore' '.gitmodules' \
-		-x '$(DIST_DIR)/*' 'dist/*' \
-		-x 'screenshots/*' \
-		-x 'spec/*' \
-		-x 'koreader/*' \
-		-x 'docs/*' \
-		-x '.github/*' \
-		-x 'tools/*' \
-		-x 'puzzle/*' \
-		-x 'data/puzzles.json' \
-		-x 'engines/stockfish*' 'engines/berserk-arm64' 'engines/berserk-x64' \
-		-x 'Makefile' '.luacheckrc' 'CONTEXT.md' 'README.md' \
-		-x 'e-reader-resolutions.md' \
-		-x '*.swp' '.DS_Store'
+	@rm -rf $(CHESS_STAGE) $(DIST_DIR)/$(ZIP_NAME)
+	@# Stage the plugin under its <name>.koplugin/ folder so unzipping the
+	@# release zip into <koreader>/plugins/ lands it exactly where KOReader
+	@# expects it — the loader only picks up plugins/<name>.koplugin/ dirs
+	@# (koreader frontend/pluginloader.lua). A flat zip silently installs
+	@# nothing on a device.
+	@mkdir -p $(CHESS_STAGE)
+	@cp -R chess core data engine engines icons ui Games $(CHESS_STAGE)/
+	@cp app.lua main.lua _meta.lua LICENSE CHANGELOG.md $(CHESS_STAGE)/
+	@rm -f $(CHESS_STAGE)/data/puzzles.json
+	@rm -f $(CHESS_STAGE)/engines/stockfish* $(CHESS_STAGE)/engines/berserk-arm64 $(CHESS_STAGE)/engines/berserk-x64
+	@cd $(DIST_DIR) && zip -qr $(ZIP_NAME) $(PLUGIN_NAME)
 	@echo "Built $(DIST_DIR)/$(ZIP_NAME) ($(VERSION))"
 	@unzip -l $(DIST_DIR)/$(ZIP_NAME) | tail -n 1
 
@@ -100,7 +96,7 @@ install: package
 		echo "KOReader plugins dir not found at $(KINDLE_PLUGINS)"; \
 		echo "Is your Kindle mounted? Set KINDLE_PLUGINS=/path/to/koreader/plugins"; \
 		exit 1; }
-	unzip -o $(DIST_DIR)/$(ZIP_NAME) -d $(KINDLE_PLUGINS)/$(PLUGIN_NAME)/
+	unzip -o $(DIST_DIR)/$(ZIP_NAME) -d $(KINDLE_PLUGINS)/
 	@echo "Installed $(PLUGIN_NAME) to $(KINDLE_PLUGINS) — restart KOReader."
 
 # --- SlatePuzzle: a second self-contained plugin packaged from the same
@@ -114,7 +110,7 @@ puzzle-package: check-version stage-puzzle
 		echo "data/puzzles.json missing or empty — run tools/fetch-puzzles.sh"; \
 		exit 1; }
 	@rm -f $(DIST_DIR)/$(PUZZLE_ZIP)
-	cd $(STAGE_DIR) && zip -qr ../$(PUZZLE_ZIP) .
+	cd $(DIST_DIR) && zip -qr $(PUZZLE_ZIP) $(PUZZLE_NAME)
 	@echo "Built $(DIST_DIR)/$(PUZZLE_ZIP) ($(VERSION))"
 	@unzip -l $(DIST_DIR)/$(PUZZLE_ZIP) | tail -n 1
 
@@ -123,7 +119,7 @@ puzzle-install: puzzle-package
 		echo "KOReader plugins dir not found at $(KINDLE_PLUGINS)"; \
 		echo "Is your Kindle mounted? Set KINDLE_PLUGINS=/path/to/koreader/plugins"; \
 		exit 1; }
-	unzip -o $(DIST_DIR)/$(PUZZLE_ZIP) -d $(KINDLE_PLUGINS)/$(PUZZLE_NAME)/
+	unzip -o $(DIST_DIR)/$(PUZZLE_ZIP) -d $(KINDLE_PLUGINS)/
 	@echo "Installed $(PUZZLE_NAME) to $(KINDLE_PLUGINS) — restart KOReader."
 
 emU-test-puzzle:

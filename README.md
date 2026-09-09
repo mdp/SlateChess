@@ -121,6 +121,12 @@ Unzip either into `<koreader>/plugins/` so the `*.koplugin/` folder lands at
 `<koreader>/plugins/<name>.koplugin/`, then restart KOReader. Look for
 **SlateChess** and **SlatePuzzle** under Tools.
 
+Releases are built for the devices KOReader runs on (Kindle, Kobo, PocketBook,
+Cervantes, reMarkable — Linux ARM): each chess zip ships the **Berserk** engine
+compiled for the device, so nothing besides the zip is needed on-device. The
+KOReader desktop/emulator is a development environment — to use the engine
+there, build a native binary with `sh engines/fetch.sh native`.
+
 ## Development
 
 Tests and lint run on the host with [LuaJIT](https://luajit.org/) — the same
